@@ -148,7 +148,11 @@ func pgReadMessage(r *bufio.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	var lenBuf [4]byte
-	if _, err := r.Read(lenBuf[:]); err != nil {
+	// A bare Read can short-read a 4-byte header on a real network
+	// connection (bufio.Reader.Read is not guaranteed to fill the
+	// buffer) — readFull loops until it does, same as the payload read
+	// below already does.
+	if _, err := readFull(r, lenBuf[:]); err != nil {
 		return 0, nil, err
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])

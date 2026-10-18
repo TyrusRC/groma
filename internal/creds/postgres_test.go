@@ -36,7 +36,7 @@ func fakePostgresServer(t *testing.T, authMethod string, accepted Pair) string {
 				r := bufio.NewReader(conn)
 				// Read + discard the startup packet.
 				var lenBuf [4]byte
-				if _, err := r.Read(lenBuf[:]); err != nil {
+				if _, err := readFull(r, lenBuf[:]); err != nil {
 					return
 				}
 				total := binary.BigEndian.Uint32(lenBuf[:])
@@ -139,7 +139,7 @@ func readPasswordMessage(r *bufio.Reader) string {
 	msgType, _ := r.ReadByte()
 	_ = msgType
 	var lenBuf [4]byte
-	r.Read(lenBuf[:])
+	readFull(r, lenBuf[:])
 	length := binary.BigEndian.Uint32(lenBuf[:])
 	payload := make([]byte, length-4)
 	readFull(r, payload)
