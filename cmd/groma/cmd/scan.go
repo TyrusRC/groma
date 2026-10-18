@@ -13,6 +13,7 @@ import (
 	"github.com/TyrusRC/groma/internal/audit"
 	"github.com/TyrusRC/groma/internal/checks"
 	"github.com/TyrusRC/groma/internal/core"
+	"github.com/TyrusRC/groma/internal/creds"
 	"github.com/TyrusRC/groma/internal/detection/legacyprotocol"
 	"github.com/TyrusRC/groma/internal/discovery"
 	"github.com/TyrusRC/groma/internal/haruspex"
@@ -36,7 +37,36 @@ var (
 	scanSSHPort            int
 	scanSSHKnownHosts      string
 	scanSSHInsecureHostKey bool
+
+	scanCheckDefaultCreds bool
 )
+
+// svcCandidate is an open port paired with the best service-name guess
+// groma has for it (naabu's fingerprint, or a well-known-port fallback
+// when no fingerprint is available) — enough to decide whether a
+// default-credential check applies, without needing full -sV data.
+type svcCandidate struct {
+	Port    int
+	Service string
+}
+
+// guessServiceByPort maps a handful of well-known ports to a service
+// name for hosts scanned without naabu's -sV (the native fallback
+// scanner has no fingerprinting of its own). Deliberately short: this is
+// a fallback for when there is no real fingerprint, not a substitute for
+// one.
+func guessServiceByPort(port int) string {
+	switch port {
+	case 22:
+		return "ssh"
+	case 21:
+		return "ftp"
+	case 5432:
+		return "postgres"
+	default:
+		return ""
+	}
+}
 
 var scanCmd = &cobra.Command{
 	Use:   "scan <host> [host...]",
@@ -60,6 +90,7 @@ func init() {
 	scanCmd.Flags().IntVar(&scanSSHPort, "ssh-port", 22, "SSH port for --ssh-audit")
 	scanCmd.Flags().StringVar(&scanSSHKnownHosts, "ssh-known-hosts", "", "known_hosts path for --ssh-audit host key verification (default: ~/.ssh/known_hosts)")
 	scanCmd.Flags().BoolVar(&scanSSHInsecureHostKey, "ssh-insecure-host-key", false, "skip SSH host key verification for --ssh-audit (opt-in, lab/first-connect targets only — vulnerable to MITM)")
+	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", false, "bounded, opt-in check for well-known default credentials (ssh, sftp, ftp, postgres) on discovered services — stops at the first accepted login per service, never a password spray")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -155,6 +186,7 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 	var findings core.Findings
 	var portResults []discovery.PortResult
 	var observations []checks.Observation
+	var svcCandidates []svcCandidate
 
 	n := naabu.New()
 	if n.IsAvailable() {
@@ -168,6 +200,11 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 		for _, r := range results {
 			findings = append(findings, r.ToFinding(host))
 			portResults = append(portResults, discovery.PortResult{Port: r.Port, Open: true, Checked: true, Banner: r.Banner})
+			svc := strings.ToLower(r.Service)
+			if svc == "" {
+				svc = guessServiceByPort(r.Port)
+			}
+			svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: svc})
 		}
 		observations = checks.ObservationsFromNaabu(host, results)
 	} else {
@@ -190,6 +227,7 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 		for _, r := range results {
 			if r.Open {
 				findings = append(findings, r.ToFinding(host))
+				svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: guessServiceByPort(r.Port)})
 			}
 		}
 		portResults = results
@@ -197,6 +235,10 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 
 	findings = append(findings, legacyprotocol.Detect(scanCtx, host, portResults)...)
 	findings = append(findings, checks.Evaluate(checkList, observations)...)
+
+	if scanCheckDefaultCreds {
+		findings = append(findings, checkDefaultCreds(scanCtx, host, svcCandidates)...)
+	}
 
 	if scanSSHAudit {
 		localObs, err := audit.Query(scanCtx, host, audit.CredentialsFromEnv(), audit.Options{
@@ -215,6 +257,43 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 	}
 
 	return findings, nil
+}
+
+// checkDefaultCreds runs the bounded default-credential check (Rule-6-
+// style: well-known vendor defaults only, stop on first hit, never a
+// spray) against every distinct (port, service) candidate that has a
+// registered checker. Unsupported services are silently skipped — see
+// internal/creds.Checkers.
+func checkDefaultCreds(ctx context.Context, host string, candidates []svcCandidate) core.Findings {
+	var findings core.Findings
+	seen := make(map[string]bool)
+	for _, c := range candidates {
+		if c.Service == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", c.Service, c.Port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		hit, err := creds.Check(ctx, c.Service, host, c.Port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "groma: %s: default-credential check on %s/%d: %v\n", host, c.Service, c.Port, err)
+			continue
+		}
+		if hit == nil {
+			continue
+		}
+		f := core.NewFinding("default-credentials-"+hit.Service, core.SeverityCritical)
+		f.Tool = "groma"
+		f.Host, f.Port, f.Protocol, f.Service = host, c.Port, "tcp", hit.Service
+		f.Title = fmt.Sprintf("Default credentials accepted on %s", hit.Service)
+		f.Evidence = fmt.Sprintf("login %q with a well-known default password was accepted", hit.User)
+		f.Remediation = "Change the default credentials immediately and disable any default accounts that are not required."
+		findings = append(findings, f)
+	}
+	return findings
 }
 
 func naabuOptionsFor() naabu.Options {

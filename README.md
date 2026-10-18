@@ -31,13 +31,32 @@ Acunetix's job, groma aims at Nessus's/OpenVAS's.
   mid-sweep, groma says so and tells you how many ports were never
   reached — it does not quietly report them as "closed."
 
+- **Credentialed/local checks.** `--ssh-audit` SSHes into the host and
+  reads its installed `dpkg`/`rpm` package versions, feeding them
+  through the exact same version-match engine as the network pass —
+  the biggest differentiator of a real Nessus/OpenVAS over a port
+  scanner. Credentials come only from env vars
+  (`GROMA_SSH_USER`/`GROMA_SSH_PASSWORD`/`GROMA_SSH_KEY`) or a running
+  ssh-agent, never a CLI flag, and host key verification defaults to
+  `~/.ssh/known_hosts` (fails closed on an unknown/changed key).
+- **Default-credential check.** `--check-default-creds` is a bounded,
+  opt-in control test (ssh/sftp/ftp/postgres today) for well-known
+  vendor-default logins — a short curated list per service, stops at
+  the first accepted login, never a password spray.
+- **Finding triage.** If a [Haruspex](https://github.com/TyrusRC/haruspex)
+  decision server is reachable at `--haruspex-url` (default
+  `127.0.0.1:3000`), groma annotates check findings with a
+  confidence/triage label to help cut backport-patched false positives.
+  Fail-open: an absent server never removes a finding, it's just
+  untriaged.
+
 ## What groma does *not* do (yet)
 
-Credentialed/local checks (SSH/WinRM into a host to audit installed
-packages — the biggest differentiator of a real Nessus/OpenVAS) and
-`.audit`-format CIS/DISA-STIG compliance checks are deliberately not
-built. Both are big, separate engines in their own right, not bolted
-onto the version-match format above.
+WinRM (Windows) credentialed checks, `.audit`-format CIS/DISA-STIG
+compliance checks, and MySQL default-credential checks are not built
+yet. `.audit` compliance in particular is a genuinely separate engine
+(config-state assertion, not version comparison) — not bolted onto the
+version-match format above.
 
 ## Quickstart
 
@@ -92,8 +111,33 @@ Flags:
       --concurrency int      worker concurrency passed to naabu
                              (0 = auto, ulimit-aware)
       --timeout duration    scan timeout per host (default 5m0s)
+      --haruspex-url string Haruspex decision server URL for finding
+                             triage (default http://127.0.0.1:3000)
+      --no-triage            skip Haruspex triage even if reachable
+      --ssh-audit            credentialed local check: SSH in and
+                             version-match installed packages
+      --ssh-port int         SSH port for --ssh-audit (default 22)
+      --ssh-known-hosts string known_hosts path for --ssh-audit
+                             (default ~/.ssh/known_hosts)
+      --ssh-insecure-host-key  skip SSH host key verification
+                             (opt-in, lab targets only)
+      --check-default-creds bounded, opt-in check for well-known
+                             default credentials (ssh, sftp, ftp,
+                             postgres)
   -v, --verbose              enable verbose output
 ```
+
+### Credentialed audit (`--ssh-audit`)
+
+```sh
+export GROMA_SSH_USER=svc-audit
+export GROMA_SSH_KEY=~/.ssh/id_ed25519   # or GROMA_SSH_PASSWORD, or run ssh-agent
+./groma scan --checks ./checks/examples --ssh-audit 10.0.0.5
+```
+
+The host key must already be in `~/.ssh/known_hosts` (same trust model
+as the `ssh` CLI). For a lab target you're connecting to for the first
+time, add `--ssh-insecure-host-key` explicitly.
 
 ### Output formats
 
@@ -139,6 +183,9 @@ internal/discovery    — native TCP-connect scanner (zero-dependency fallback)
 internal/detection/legacyprotocol — seed protocol checks (Telnet exposure, FTP anon login)
 internal/tools/naabu   — optional naabu wrapper (fast sweep + native -sV fingerprint)
 internal/checks        — declarative YAML check format + matching engine
+internal/audit          — SSH credentialed/local checks (dpkg/rpm package audit)
+internal/creds          — bounded default-credential checks (ssh/sftp/ftp/postgres)
+internal/haruspex       — fail-open Haruspex finding-triage client
 internal/sysnet        — shared ulimit-aware concurrency helper
 internal/reporting     — JSON / text / SARIF report rendering
 cmd/groma              — the CLI (Cobra)
