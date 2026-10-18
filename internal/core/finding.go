@@ -32,6 +32,12 @@ type Finding struct {
 
 	Evidence string `json:"evidence,omitempty"` // what was actually observed, never destructive proof
 
+	// Triage/Confidence are set by internal/haruspex when a Haruspex decision
+	// server is reachable; empty/zero means "not triaged" (server absent or
+	// errored), never "ruled out" — Haruspex never removes a candidate.
+	Triage     string  `json:"triage,omitempty"`     // "confirmed" | "likely_noise" | "unproven" | "" (not triaged)
+	Confidence float64 `json:"confidence,omitempty"` // Haruspex P(yes) this is a real, reportable finding
+
 	CWE        []string `json:"cwe,omitempty"`
 	CVSS       float64  `json:"cvss,omitempty"`
 	CVSSVector string   `json:"cvss_vector,omitempty"`

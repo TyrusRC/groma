@@ -103,6 +103,38 @@ func TestBuildArgsTopPortsIgnoredWhenPortsSet(t *testing.T) {
 	}
 }
 
+func TestBuildArgsNewFlags(t *testing.T) {
+	args := BuildArgs("h", Options{
+		WarmUpTimeS:         5,
+		DisplayCDN:          true,
+		ServiceDiscovery:    true,
+		Verify:              true,
+		Passive:             true,
+		SmartScan:           true,
+		PredictionThreshold: 60,
+		ExcludeHosts:        "10.0.0.1,10.0.0.2",
+		ExcludePorts:        "25,587",
+		PortThreshold:       100,
+	})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"-warm-up-time 5", "-display-cdn", "-sD", "-verify", "-passive",
+		"-ss", "-pt 60", "-exclude-hosts 10.0.0.1,10.0.0.2",
+		"-exclude-ports 25,587", "-port-threshold 100",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in args, got %q", want, joined)
+		}
+	}
+}
+
+func TestBuildArgsSmartScanOmitsThresholdWhenUnset(t *testing.T) {
+	args := BuildArgs("h", Options{SmartScan: true})
+	if hasFlag(args, "-pt") {
+		t.Errorf("PredictionThreshold=0 should omit -pt and use naabu's own default, got %q", strings.Join(args, " "))
+	}
+}
+
 func TestParseJSONLines(t *testing.T) {
 	raw := `{"host":"scanme.example","ip":"10.0.0.5","port":21,"protocol":"tcp","cdn":false,"name":"ftp","product":"vsftpd","version":"3.0.3","banner":"220 (vsFTPd 3.0.3)","cpes":["cpe:/a:vsftpd_project:vsftpd:3.0.3"]}
 not json, a stray banner line naabu printed despite -silent

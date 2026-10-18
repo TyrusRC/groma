@@ -133,6 +133,9 @@ func (r *Report) WriteText(w io.Writer) error {
 		if f.Remediation != "" {
 			fmt.Fprintf(w, "  Fix:      %s\n", f.Remediation)
 		}
+		if f.Triage != "" {
+			fmt.Fprintf(w, "  Triage:   %s (haruspex confidence %.2f)\n", f.Triage, f.Confidence)
+		}
 	}
 	return nil
 }

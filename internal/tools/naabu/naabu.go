@@ -56,11 +56,23 @@ type Options struct {
 	Concurrency int // -c, worker threads. 0 = sysnet.RecommendedConcurrency(defaultConcurrency, maxConcurrency).
 	Retries     int // -retries. 0 = naabu's default (3).
 	TimeoutMS   int // -timeout, per-probe timeout in ms. 0 = naabu's default (1000).
+	WarmUpTimeS int // -warm-up-time, seconds between scan phases. 0 = naabu's default (2).
 
-	ExcludeCDN     bool // -exclude-cdn: cap CDN/WAF-fronted hosts to ports 80/443
-	ServiceVersion bool // -sV: naabu's native nmap-service-probes fingerprinting
+	ExcludeCDN       bool // -exclude-cdn: cap CDN/WAF-fronted hosts to ports 80/443
+	DisplayCDN       bool // -display-cdn: report which CDN/WAF fronts the host
+	ServiceVersion   bool // -sV: naabu's native nmap-service-probes fingerprinting
+	ServiceDiscovery bool // -sD: fast port->service name mapping (no version probe)
+	Verify           bool // -verify: re-validate each open port with a second TCP connect before reporting it
+	Passive          bool // -passive: Shodan InternetDB lookup only — zero packets sent to the target
 
-	CustomArgs []string // escape hatch for flags this wrapper doesn't model (e.g. -nmap-cli)
+	SmartScan           bool // -ss: predictive scanning using naabu's port-correlation model (NOT exhaustive — never set on a full-coverage scan)
+	PredictionThreshold int  // -pt, 0-100. Only meaningful with SmartScan. 0 = naabu's default (20).
+
+	ExcludeHosts  string // -exclude-hosts: comma-separated hosts/CIDRs to skip
+	ExcludePorts  string // -exclude-ports: comma-separated ports to skip
+	PortThreshold int    // -port-threshold: stop scanning a host after this many open ports are found (0 = naabu's default: disabled)
+
+	CustomArgs []string // escape hatch for flags this wrapper doesn't model (e.g. -nmap-cli, -proxy, -source-ip, -interface, -r)
 }
 
 // DefaultOptions returns a fast triage baseline: naabu's own top-100
@@ -197,11 +209,41 @@ func BuildArgs(host string, opts Options) []string {
 	if opts.TimeoutMS > 0 {
 		args = append(args, "-timeout", strconv.Itoa(opts.TimeoutMS))
 	}
+	if opts.WarmUpTimeS > 0 {
+		args = append(args, "-warm-up-time", strconv.Itoa(opts.WarmUpTimeS))
+	}
 	if opts.ExcludeCDN {
 		args = append(args, "-exclude-cdn")
 	}
+	if opts.DisplayCDN {
+		args = append(args, "-display-cdn")
+	}
 	if opts.ServiceVersion {
 		args = append(args, "-sV")
+	}
+	if opts.ServiceDiscovery {
+		args = append(args, "-sD")
+	}
+	if opts.Verify {
+		args = append(args, "-verify")
+	}
+	if opts.Passive {
+		args = append(args, "-passive")
+	}
+	if opts.SmartScan {
+		args = append(args, "-ss")
+		if opts.PredictionThreshold > 0 {
+			args = append(args, "-pt", strconv.Itoa(opts.PredictionThreshold))
+		}
+	}
+	if opts.ExcludeHosts != "" {
+		args = append(args, "-exclude-hosts", opts.ExcludeHosts)
+	}
+	if opts.ExcludePorts != "" {
+		args = append(args, "-exclude-ports", opts.ExcludePorts)
+	}
+	if opts.PortThreshold > 0 {
+		args = append(args, "-port-threshold", strconv.Itoa(opts.PortThreshold))
 	}
 	args = append(args, opts.CustomArgs...)
 	return args

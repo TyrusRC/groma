@@ -14,6 +14,7 @@ import (
 	"github.com/TyrusRC/groma/internal/core"
 	"github.com/TyrusRC/groma/internal/detection/legacyprotocol"
 	"github.com/TyrusRC/groma/internal/discovery"
+	"github.com/TyrusRC/groma/internal/haruspex"
 	"github.com/TyrusRC/groma/internal/reporting"
 	"github.com/TyrusRC/groma/internal/tools/naabu"
 )
@@ -27,6 +28,8 @@ var (
 	scanTimeout     time.Duration
 	scanConcurrency int
 	scanRate        int
+	scanHaruspexURL string
+	scanNoTriage    bool
 )
 
 var scanCmd = &cobra.Command{
@@ -45,6 +48,8 @@ func init() {
 	scanCmd.Flags().DurationVar(&scanTimeout, "timeout", 5*time.Minute, "scan timeout per host")
 	scanCmd.Flags().IntVar(&scanConcurrency, "concurrency", 0, "worker concurrency passed to naabu (0 = auto, ulimit-aware)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
+	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
+	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -74,6 +79,14 @@ func runScan(_ *cobra.Command, args []string) error {
 		allFindings = append(allFindings, findings...)
 	}
 	duration := time.Since(start)
+
+	if !scanNoTriage {
+		// Fail-open: a single /health probe decides whether to spend any
+		// further network calls at all (internal/haruspex.Ping) — an absent
+		// server costs one short probe, not a timeout per finding, and never
+		// removes a finding from the report (see package doc).
+		haruspex.TriageFindings(ctx, haruspex.NewClient(scanHaruspexURL), allFindings)
+	}
 
 	report := reporting.NewReport(args, allFindings, duration)
 	if err := writeReport(report); err != nil {
