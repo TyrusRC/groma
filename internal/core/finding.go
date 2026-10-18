@@ -27,6 +27,8 @@ type Finding struct {
 	Port     int    `json:"port,omitempty"`
 	Protocol string `json:"protocol,omitempty"` // tcp | udp
 	Service  string `json:"service,omitempty"`  // e.g. "ftp", "telnet" (from banner/port)
+	Product  string `json:"product,omitempty"`  // e.g. "vsftpd" (naabu -sV fingerprint; empty without it)
+	Version  string `json:"version,omitempty"`
 
 	Evidence string `json:"evidence,omitempty"` // what was actually observed, never destructive proof
 

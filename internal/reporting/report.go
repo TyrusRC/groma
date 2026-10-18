@@ -115,6 +115,9 @@ func (r *Report) WriteText(w io.Writer) error {
 		if f.Service != "" {
 			fmt.Fprintf(w, "  Service:  %s\n", f.Service)
 		}
+		if f.Product != "" {
+			fmt.Fprintf(w, "  Product:  %s %s\n", f.Product, f.Version)
+		}
 		if f.Description != "" {
 			fmt.Fprintf(w, "  Detail:   %s\n", f.Description)
 		}

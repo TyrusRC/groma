@@ -134,6 +134,9 @@ func TestToFindingMapsFields(t *testing.T) {
 	if f.Tool != "groma" {
 		t.Errorf("expected Tool=groma, got %q", f.Tool)
 	}
+	if f.Product != "apache" || f.Version != "2.4.49" {
+		t.Errorf("expected the observed product/version to map through as structured fields, got %+v", f)
+	}
 }
 
 func TestEvaluateReturnsOneFindingPerMatchingPair(t *testing.T) {

@@ -149,6 +149,7 @@ func (c *Check) ToFinding(obs Observation) *core.Finding {
 	f.Title = c.Info.Name
 	f.Description = c.Info.Description
 	f.Host, f.Port, f.Protocol = obs.Host, obs.Port, obs.Protocol
+	f.Product, f.Version = obs.Product, obs.Version
 	f.Remediation = c.Info.Remediation
 	f.References = c.Info.Reference
 	if c.Info.Classification.CWEID != "" {

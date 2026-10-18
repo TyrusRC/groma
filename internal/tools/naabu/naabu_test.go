@@ -154,6 +154,9 @@ func TestToFindingIsInformational(t *testing.T) {
 	if f.Host != "10.0.0.5" || f.Port != 21 || f.Service != "ftp" {
 		t.Errorf("finding location fields mismapped: %+v", f)
 	}
+	if f.Product != "vsftpd" || f.Version != "3.0.3" {
+		t.Errorf("expected Product/Version to be exposed as structured fields, not just folded into Title, got %+v", f)
+	}
 	if f.Evidence != "Banner: 220 ready" {
 		t.Errorf("expected evidence to carry the banner, got %q", f.Evidence)
 	}

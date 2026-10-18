@@ -287,6 +287,8 @@ func (r Result) ToFinding(host string) *core.Finding {
 	f.Tool = "naabu"
 	f.Host, f.Port, f.Protocol = host, r.Port, r.Protocol
 	f.Service = r.Service
+	f.Product = r.Product
+	f.Version = r.Version
 	title := fmt.Sprintf("Port %d/%s open", r.Port, r.Protocol)
 	if r.Product != "" {
 		title = fmt.Sprintf("%s (%s %s)", title, r.Product, r.Version)
