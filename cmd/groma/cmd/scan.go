@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/TyrusRC/groma/internal/audit"
 	"github.com/TyrusRC/groma/internal/checks"
 	"github.com/TyrusRC/groma/internal/core"
 	"github.com/TyrusRC/groma/internal/detection/legacyprotocol"
@@ -30,6 +31,11 @@ var (
 	scanRate        int
 	scanHaruspexURL string
 	scanNoTriage    bool
+
+	scanSSHAudit           bool
+	scanSSHPort            int
+	scanSSHKnownHosts      string
+	scanSSHInsecureHostKey bool
 )
 
 var scanCmd = &cobra.Command{
@@ -50,6 +56,10 @@ func init() {
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
+	scanCmd.Flags().BoolVar(&scanSSHAudit, "ssh-audit", false, "credentialed local check: SSH into the host and version-match its installed packages (needs GROMA_SSH_USER + GROMA_SSH_PASSWORD/GROMA_SSH_KEY env vars, or a running ssh-agent)")
+	scanCmd.Flags().IntVar(&scanSSHPort, "ssh-port", 22, "SSH port for --ssh-audit")
+	scanCmd.Flags().StringVar(&scanSSHKnownHosts, "ssh-known-hosts", "", "known_hosts path for --ssh-audit host key verification (default: ~/.ssh/known_hosts)")
+	scanCmd.Flags().BoolVar(&scanSSHInsecureHostKey, "ssh-insecure-host-key", false, "skip SSH host key verification for --ssh-audit (opt-in, lab/first-connect targets only — vulnerable to MITM)")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -187,6 +197,23 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 
 	findings = append(findings, legacyprotocol.Detect(scanCtx, host, portResults)...)
 	findings = append(findings, checks.Evaluate(checkList, observations)...)
+
+	if scanSSHAudit {
+		localObs, err := audit.Query(scanCtx, host, audit.CredentialsFromEnv(), audit.Options{
+			Port:                      scanSSHPort,
+			KnownHostsPath:            scanSSHKnownHosts,
+			InsecureSkipHostKeyVerify: scanSSHInsecureHostKey,
+		})
+		if err != nil {
+			// Fail open on the SSH audit specifically: a credential/network
+			// problem on the credentialed pass must never drop the
+			// unauthenticated findings already collected above.
+			fmt.Fprintf(os.Stderr, "groma: %s: credentialed audit skipped: %v\n", host, err)
+		} else {
+			findings = append(findings, checks.Evaluate(checkList, localObs)...)
+		}
+	}
+
 	return findings, nil
 }
 

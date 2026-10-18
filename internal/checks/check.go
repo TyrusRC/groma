@@ -157,7 +157,11 @@ func (c *Check) ToFinding(obs Observation) *core.Finding {
 	}
 	f.CVSS = c.Info.Classification.CVSSScore
 	f.CVSSVector = c.Info.Classification.CVSSMetrics
-	f.Evidence = fmt.Sprintf("Observed %s %s on port %d/%s", obs.Product, obs.Version, obs.Port, obs.Protocol)
+	if obs.Protocol == "local" {
+		f.Evidence = fmt.Sprintf("Installed package %s %s (credentialed local check)", obs.Product, obs.Version)
+	} else {
+		f.Evidence = fmt.Sprintf("Observed %s %s on port %d/%s", obs.Product, obs.Version, obs.Port, obs.Protocol)
+	}
 	return f
 }
 

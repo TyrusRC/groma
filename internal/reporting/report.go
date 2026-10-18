@@ -111,7 +111,11 @@ func (r *Report) WriteText(w io.Writer) error {
 	fmt.Fprintln(w, "FINDINGS:")
 	for _, f := range r.Findings {
 		fmt.Fprintf(w, "\n[%s] %s\n", severityLabel(f.Severity), f.Title)
-		fmt.Fprintf(w, "  Host:     %s:%d/%s\n", f.Host, f.Port, f.Protocol)
+		if f.Protocol == "local" {
+			fmt.Fprintf(w, "  Host:     %s (credentialed local check)\n", f.Host)
+		} else {
+			fmt.Fprintf(w, "  Host:     %s:%d/%s\n", f.Host, f.Port, f.Protocol)
+		}
 		if f.Service != "" {
 			fmt.Fprintf(w, "  Service:  %s\n", f.Service)
 		}
