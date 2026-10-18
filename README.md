@@ -50,13 +50,20 @@ Acunetix's job, groma aims at Nessus's/OpenVAS's.
   Fail-open: an absent server never removes a finding, it's just
   untriaged.
 
+- **Compliance checks.** `--compliance <policy.audit>` parses and runs a
+  Tenable-format `.audit` CIS/DISA-STIG policy over the same SSH
+  connection as `--ssh-audit`. Only `CMD_EXEC` (run a command, regex-
+  match the output) and `FILE_CHECK` (owner/group/mode) are executed —
+  the two types that cover the overwhelming majority of real Unix
+  content; everything else (Windows-only types, `BANNER_CHECK`,
+  `PROCESS_CHECK`) is parsed but reported as **not checked**, never
+  silently scored as a pass. `<if>`/`<condition>`/`<then>`/`<else>`
+  platform gating is supported; `@VARIABLE@` substitution is not.
+
 ## What groma does *not* do (yet)
 
-WinRM (Windows) credentialed checks, `.audit`-format CIS/DISA-STIG
-compliance checks, and MySQL default-credential checks are not built
-yet. `.audit` compliance in particular is a genuinely separate engine
-(config-state assertion, not version comparison) — not bolted onto the
-version-match format above.
+WinRM (Windows) credentialed checks and MySQL default-credential checks
+are not built yet.
 
 ## Quickstart
 
@@ -124,6 +131,9 @@ Flags:
       --check-default-creds bounded, opt-in check for well-known
                              default credentials (ssh, sftp, ftp,
                              postgres)
+      --compliance string   path to a Tenable .audit CIS/DISA-STIG
+                             policy to run over SSH (CMD_EXEC and
+                             FILE_CHECK only)
   -v, --verbose              enable verbose output
 ```
 
@@ -185,6 +195,7 @@ internal/tools/naabu   — optional naabu wrapper (fast sweep + native -sV finge
 internal/checks        — declarative YAML check format + matching engine
 internal/audit          — SSH credentialed/local checks (dpkg/rpm package audit)
 internal/creds          — bounded default-credential checks (ssh/sftp/ftp/postgres)
+internal/compliance     — .audit CIS/DISA-STIG parser + evaluator (CMD_EXEC/FILE_CHECK)
 internal/haruspex       — fail-open Haruspex finding-triage client
 internal/sysnet        — shared ulimit-aware concurrency helper
 internal/reporting     — JSON / text / SARIF report rendering

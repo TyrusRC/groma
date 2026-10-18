@@ -83,11 +83,11 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Query SSHes into host and returns one checks.Observation per installed
-// package it could enumerate. Protocol is always "local" on the returned
-// observations (distinguishes a credentialed hit from a naabu/network
-// one in reporting) and Port is 0 (not meaningful for a package).
-func Query(ctx context.Context, host string, creds Credentials, opts Options) ([]checks.Observation, error) {
+// Dial opens an authenticated SSH connection to host, using the same
+// credential/host-key policy as Query. Exported so other credentialed
+// passes (internal/compliance) can share one connection across many
+// commands instead of paying a fresh handshake per command.
+func Dial(ctx context.Context, host string, creds Credentials, opts Options) (*ssh.Client, error) {
 	opts = opts.withDefaults()
 
 	hostKeyCB, err := hostKeyCallback(opts)
@@ -125,7 +125,18 @@ func Query(ctx context.Context, host string, creds Credentials, opts Options) ([
 		conn.Close()
 		return nil, fmt.Errorf("audit: SSH handshake with %s: %w", addr, err)
 	}
-	client := ssh.NewClient(sshConn, chans, reqs)
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+// Query SSHes into host and returns one checks.Observation per installed
+// package it could enumerate. Protocol is always "local" on the returned
+// observations (distinguishes a credentialed hit from a naabu/network
+// one in reporting) and Port is 0 (not meaningful for a package).
+func Query(ctx context.Context, host string, creds Credentials, opts Options) ([]checks.Observation, error) {
+	client, err := Dial(ctx, host, creds, opts)
+	if err != nil {
+		return nil, err
+	}
 	defer client.Close()
 
 	pkgs, pm, err := queryPackages(client)

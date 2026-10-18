@@ -12,6 +12,7 @@ import (
 
 	"github.com/TyrusRC/groma/internal/audit"
 	"github.com/TyrusRC/groma/internal/checks"
+	"github.com/TyrusRC/groma/internal/compliance"
 	"github.com/TyrusRC/groma/internal/core"
 	"github.com/TyrusRC/groma/internal/creds"
 	"github.com/TyrusRC/groma/internal/detection/legacyprotocol"
@@ -39,6 +40,8 @@ var (
 	scanSSHInsecureHostKey bool
 
 	scanCheckDefaultCreds bool
+
+	scanCompliancePath string
 )
 
 // svcCandidate is an open port paired with the best service-name guess
@@ -91,6 +94,7 @@ func init() {
 	scanCmd.Flags().StringVar(&scanSSHKnownHosts, "ssh-known-hosts", "", "known_hosts path for --ssh-audit host key verification (default: ~/.ssh/known_hosts)")
 	scanCmd.Flags().BoolVar(&scanSSHInsecureHostKey, "ssh-insecure-host-key", false, "skip SSH host key verification for --ssh-audit (opt-in, lab/first-connect targets only — vulnerable to MITM)")
 	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", false, "bounded, opt-in check for well-known default credentials (ssh, sftp, ftp, postgres) on discovered services — stops at the first accepted login per service, never a password spray")
+	scanCmd.Flags().StringVar(&scanCompliancePath, "compliance", "", "path to a Tenable .audit CIS/DISA-STIG compliance policy to run over SSH (needs the same GROMA_SSH_* credentials as --ssh-audit; CMD_EXEC and FILE_CHECK only — see internal/compliance)")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -109,10 +113,22 @@ func runScan(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	var compliancePolicy *compliance.Policy
+	if scanCompliancePath != "" {
+		raw, err := os.ReadFile(scanCompliancePath)
+		if err != nil {
+			return fmt.Errorf("reading --compliance policy %s: %w", scanCompliancePath, err)
+		}
+		compliancePolicy, err = compliance.Parse(string(raw))
+		if err != nil {
+			return fmt.Errorf("parsing --compliance policy %s: %w", scanCompliancePath, err)
+		}
+	}
+
 	start := time.Now()
 	var allFindings core.Findings
 	for _, host := range args {
-		findings, err := scanHost(ctx, host, checkList)
+		findings, err := scanHost(ctx, host, checkList, compliancePolicy)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
 			continue
@@ -179,7 +195,7 @@ func writeReport(report *reporting.Report) error {
 // every finding. Both discovery paths run the same legacyprotocol checks
 // so a missing naabu install never silently drops coverage, only service
 // fingerprinting (and therefore CVE-matching) depth.
-func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core.Findings, error) {
+func scanHost(ctx context.Context, host string, checkList []*checks.Check, compliancePolicy *compliance.Policy) (core.Findings, error) {
 	scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
 	defer cancel()
 
@@ -256,6 +272,49 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check) (core
 		}
 	}
 
+	if compliancePolicy != nil {
+		complianceFindings, err := runCompliance(scanCtx, host, compliancePolicy)
+		if err != nil {
+			// Same fail-open posture as --ssh-audit: a credential/network
+			// problem on the compliance pass must never drop the findings
+			// already collected above.
+			fmt.Fprintf(os.Stderr, "groma: %s: compliance check skipped: %v\n", host, err)
+		} else {
+			findings = append(findings, complianceFindings...)
+		}
+	}
+
+	return findings, nil
+}
+
+// runCompliance opens its own SSH connection (sharing the same
+// GROMA_SSH_* credential/host-key policy as --ssh-audit, but not the
+// same TCP connection, since --ssh-audit may target a different port or
+// not be enabled at all) and evaluates the compliance policy over it.
+func runCompliance(ctx context.Context, host string, policy *compliance.Policy) (core.Findings, error) {
+	client, err := audit.Dial(ctx, host, audit.CredentialsFromEnv(), audit.Options{
+		Port:                      scanSSHPort,
+		KnownHostsPath:            scanSSHKnownHosts,
+		InsecureSkipHostKeyVerify: scanSSHInsecureHostKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	results, err := compliance.Evaluate(ctx, policy, &compliance.SSHExecutor{Client: client})
+	if err != nil {
+		return nil, fmt.Errorf("evaluating compliance policy: %w", err)
+	}
+	findings, unsupported, errored := compliance.ToFindings(host, results)
+	if verbose {
+		for _, r := range unsupported {
+			fmt.Fprintf(os.Stderr, "groma: %s: compliance check %q (%s) not implemented, not scored\n", host, r.Item.Description, r.Item.Type)
+		}
+		for _, r := range errored {
+			fmt.Fprintf(os.Stderr, "groma: %s: compliance check %q errored: %v\n", host, r.Item.Description, r.Err)
+		}
+	}
 	return findings, nil
 }
 
