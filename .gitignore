@@ -1,0 +1,56 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/groma
+
+# Test binary
+*.test
+
+# Output
+*.out
+coverage/
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+*.tmp
+.env
+.env.local
+.env.*.local
+
+# Secrets (never commit)
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# Claude Code
+.claude/
+
+# Markdown files (except README.md) — mirrors the assay convention
+*.md
+!README.md
+
+# Scan output
+scan-output/
+*.sarif
