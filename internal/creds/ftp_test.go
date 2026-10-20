@@ -128,7 +128,7 @@ func TestCheckStopsEarlyOnFirstHit(t *testing.T) {
 }
 
 func TestCheckUnknownServiceReturnsNilNil(t *testing.T) {
-	hit, err := Check(context.Background(), "mysql", "127.0.0.1", 3306)
+	hit, err := Check(context.Background(), "oracle_tns", "127.0.0.1", 1521)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

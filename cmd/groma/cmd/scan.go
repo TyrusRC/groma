@@ -18,6 +18,7 @@ import (
 	"github.com/TyrusRC/groma/internal/detection/legacyprotocol"
 	"github.com/TyrusRC/groma/internal/discovery"
 	"github.com/TyrusRC/groma/internal/haruspex"
+	"github.com/TyrusRC/groma/internal/nvd"
 	"github.com/TyrusRC/groma/internal/reporting"
 	"github.com/TyrusRC/groma/internal/tools/naabu"
 )
@@ -42,6 +43,10 @@ var (
 	scanCheckDefaultCreds bool
 
 	scanCompliancePath string
+
+	scanNVD      bool
+	scanNVDKey   string
+	scanNVDCache string
 )
 
 // svcCandidate is an open port paired with the best service-name guess
@@ -53,22 +58,12 @@ type svcCandidate struct {
 	Service string
 }
 
-// guessServiceByPort maps a handful of well-known ports to a service
-// name for hosts scanned without naabu's -sV (the native fallback
-// scanner has no fingerprinting of its own). Deliberately short: this is
-// a fallback for when there is no real fingerprint, not a substitute for
-// one.
+// guessServiceByPort maps well-known ports to service names for hosts
+// scanned without naabu's -sV. Covers every service that has a
+// registered default-credential checker in internal/creds, plus common
+// services whose port number is unambiguous (modeled after nmap-services).
 func guessServiceByPort(port int) string {
-	switch port {
-	case 22:
-		return "ssh"
-	case 21:
-		return "ftp"
-	case 5432:
-		return "postgres"
-	default:
-		return ""
-	}
+	return discovery.FingerprintByPort(port)
 }
 
 var scanCmd = &cobra.Command{
@@ -93,8 +88,11 @@ func init() {
 	scanCmd.Flags().IntVar(&scanSSHPort, "ssh-port", 22, "SSH port for --ssh-audit")
 	scanCmd.Flags().StringVar(&scanSSHKnownHosts, "ssh-known-hosts", "", "known_hosts path for --ssh-audit host key verification (default: ~/.ssh/known_hosts)")
 	scanCmd.Flags().BoolVar(&scanSSHInsecureHostKey, "ssh-insecure-host-key", false, "skip SSH host key verification for --ssh-audit (opt-in, lab/first-connect targets only — vulnerable to MITM)")
-	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", false, "bounded, opt-in check for well-known default credentials (ssh, sftp, ftp, postgres) on discovered services — stops at the first accepted login per service, never a password spray")
+	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", false, "bounded default-credential check for 35+ services (ssh, ftp, postgres, mysql, redis, mongodb, mssql, vnc, ldap, snmp, telnet, smtp, memcached, elasticsearch, grafana, jenkins, tomcat, rabbitmq, docker, k8s, consul, minio, portainer, harbor, argocd, jupyter, ollama, chromadb, airflow, and more); pair lists sourced from SecLists/Default-Credentials")
 	scanCmd.Flags().StringVar(&scanCompliancePath, "compliance", "", "path to a Tenable .audit CIS/DISA-STIG compliance policy to run over SSH (needs the same GROMA_SSH_* credentials as --ssh-audit; CMD_EXEC and FILE_CHECK only — see internal/compliance)")
+	scanCmd.Flags().BoolVar(&scanNVD, "nvd", false, "query the NIST NVD API for CVEs matching discovered service CPEs (live lookup, replaces hand-maintained YAML checks with 200k+ CVE coverage; set GROMA_NVD_API_KEY for higher rate limits)")
+	scanCmd.Flags().StringVar(&scanNVDKey, "nvd-api-key", "", "NVD API key for higher rate limits (50 req/30s vs 5); also reads GROMA_NVD_API_KEY env var")
+	scanCmd.Flags().StringVar(&scanNVDCache, "nvd-cache", "", "directory to cache NVD responses (default: $HOME/.cache/groma/nvd)")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -225,7 +223,7 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check, compl
 		observations = checks.ObservationsFromNaabu(host, results)
 	} else {
 		if verbose {
-			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to the native TCP-connect scanner (no service fingerprinting, so CVE checks have nothing to match on)")
+			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to native TCP-connect scanner with banner fingerprinting")
 		}
 		ports, err := nativePortList()
 		if err != nil {
@@ -233,24 +231,69 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check, compl
 		}
 		results, err := discovery.NewScanner().Scan(scanCtx, host, ports)
 		if err != nil {
-			// Same reasoning as the naabu branch: a context timeout still
-			// returns every port the scanner actually reached. Only the
-			// unreached tail (Checked=false) is genuinely unknown — the
-			// legacyprotocol/checks passes below still run against what
-			// was found, instead of the whole host being silently skipped.
 			fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
 		}
 		for _, r := range results {
 			if r.Open {
 				findings = append(findings, r.ToFinding(host))
-				svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: guessServiceByPort(r.Port)})
+				// Try banner fingerprint first, fall back to port guess.
+				svc := ""
+				if si := discovery.FingerprintBanner(r.Banner); si != nil {
+					svc = strings.ToLower(si.Product)
+				}
+				if svc == "" {
+					svc = guessServiceByPort(r.Port)
+				}
+				svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: svc})
 			}
 		}
 		portResults = results
+		observations = checks.ObservationsFromBanners(host, portResults)
+	}
+
+	// Active service probing: if port discovery produced open ports but
+	// no service observations (naabu's -sV unavailable, or native scanner
+	// banners didn't match), run protocol-specific probes on each open
+	// port. This is the nmap technique: NULL probe → HTTP probe → TLS
+	// probe, matching responses against known service patterns.
+	if len(observations) == 0 && len(portResults) > 0 {
+		if verbose {
+			open := 0
+			for _, r := range portResults {
+				if r.Open {
+					open++
+				}
+			}
+			fmt.Fprintf(os.Stderr, "groma: running active service probes on %d open port(s)\n", open)
+		}
+		svcMap := discovery.ProbeResults(scanCtx, host, portResults)
+		// Rebuild observations and svcCandidates from probe results.
+		for i, r := range portResults {
+			if !r.Open {
+				continue
+			}
+			if si, ok := svcMap[r.Port]; ok && si != nil {
+				// Update the portResult banner for downstream use.
+				if si.Product != "" {
+					portResults[i].Banner = r.Banner
+				}
+			}
+		}
+		observations = checks.ObservationsFromProbes(host, portResults, svcMap)
+		// Update svcCandidates with probed service names.
+		for i, c := range svcCandidates {
+			if si, ok := svcMap[c.Port]; ok && si != nil && si.Product != "" {
+				svcCandidates[i].Service = strings.ToLower(si.Product)
+			}
+		}
 	}
 
 	findings = append(findings, legacyprotocol.Detect(scanCtx, host, portResults)...)
 	findings = append(findings, checks.Evaluate(checkList, observations)...)
+
+	if scanNVD {
+		findings = append(findings, queryNVD(scanCtx, observations)...)
+	}
 
 	if scanCheckDefaultCreds {
 		findings = append(findings, checkDefaultCreds(scanCtx, host, svcCandidates)...)
@@ -348,7 +391,10 @@ func checkDefaultCreds(ctx context.Context, host string, candidates []svcCandida
 		f.Tool = "groma"
 		f.Host, f.Port, f.Protocol, f.Service = host, c.Port, "tcp", hit.Service
 		f.Title = fmt.Sprintf("Default credentials accepted on %s", hit.Service)
+		f.Description = fmt.Sprintf("The %s service accepted a well-known default credential. "+
+			"An attacker with network access can authenticate using this publicly known pair.", hit.Service)
 		f.Evidence = fmt.Sprintf("login %q with a well-known default password was accepted", hit.User)
+		f.CWE = []string{"CWE-798"}
 		f.Remediation = "Change the default credentials immediately and disable any default accounts that are not required."
 		findings = append(findings, f)
 	}
@@ -426,3 +472,59 @@ func parsePortSpec(spec string) ([]int, error) {
 	}
 	return ports, nil
 }
+
+// queryNVD looks up CVEs from the NIST NVD API for each observation
+// that has a CPE. Deduplicates by CPE so the same service version is
+// queried only once regardless of how many ports it appears on.
+func queryNVD(ctx context.Context, observations []checks.Observation) core.Findings {
+	apiKey := scanNVDKey
+	if apiKey == "" {
+		apiKey = os.Getenv("GROMA_NVD_API_KEY")
+	}
+	cacheDir := scanNVDCache
+	if cacheDir == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			cacheDir = home + "/.cache/groma/nvd"
+		}
+	}
+	client := nvd.NewClient(apiKey, cacheDir)
+
+	type cpeObs struct {
+		cpe string
+		obs []checks.Observation
+	}
+	seen := map[string]*cpeObs{}
+	for _, obs := range observations {
+		for _, cpe := range obs.CPEs {
+			// Convert CPE 2.2 URI (from naabu/banner fingerprint) to CPE
+			// 2.3 format that NVD API 2.0 requires, splicing in the
+			// observed version.
+			cpe23 := nvd.CPE22to23(cpe, obs.Version)
+			if _, ok := seen[cpe23]; !ok {
+				seen[cpe23] = &cpeObs{cpe: cpe23}
+			}
+			seen[cpe23].obs = append(seen[cpe23].obs, obs)
+		}
+	}
+
+	var findings core.Findings
+	for _, co := range seen {
+		matches, err := client.QueryByCPE(ctx, co.cpe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "groma: nvd query for %s: %v\n", co.cpe, err)
+			continue
+		}
+		if verbose && len(matches) > 0 {
+			fmt.Fprintf(os.Stderr, "groma: nvd: %d CVE(s) for %s\n", len(matches), co.cpe)
+		}
+		for _, obs := range co.obs {
+			findings = append(findings, nvd.ToFindings(
+				obs.Host, obs.Port, obs.Protocol,
+				obs.Product, obs.Product, obs.Version, matches,
+			)...)
+		}
+	}
+	return findings
+}
+

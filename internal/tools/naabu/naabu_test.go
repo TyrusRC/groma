@@ -24,8 +24,10 @@ func TestBuildArgsDefaults(t *testing.T) {
 	if !hasFlag(args, "-exclude-cdn") {
 		t.Errorf("DefaultOptions sets ExcludeCDN=true, expected -exclude-cdn in %q", joined)
 	}
-	if !hasFlag(args, "-sV") {
-		t.Errorf("DefaultOptions sets ServiceVersion=true, expected -sV in %q", joined)
+	// NOTE: -sV is intentionally NOT passed — it's broken in naabu 2.6.1.
+	// Service fingerprinting is done by groma's native probe engine.
+	if hasFlag(args, "-sV") {
+		t.Errorf("-sV should not be passed (broken in naabu 2.6.1), got %q", joined)
 	}
 	if !strings.Contains(joined, "-s c") {
 		t.Errorf("expected default scan type 'c' (connect, no privileges needed), got %q", joined)
@@ -117,8 +119,9 @@ func TestBuildArgsNewFlags(t *testing.T) {
 		PortThreshold:       100,
 	})
 	joined := strings.Join(args, " ")
+	// NOTE: -sD and -sV are intentionally NOT passed (broken in naabu 2.6.1).
 	for _, want := range []string{
-		"-warm-up-time 5", "-display-cdn", "-sD", "-verify", "-passive",
+		"-warm-up-time 5", "-display-cdn", "-verify", "-passive",
 		"-ss", "-pt 60", "-exclude-hosts 10.0.0.1,10.0.0.2",
 		"-exclude-ports 25,587", "-port-threshold 100",
 	} {

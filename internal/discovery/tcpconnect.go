@@ -54,8 +54,13 @@ func (r PortResult) ToFinding(host string) *core.Finding {
 // what a full nmap pass is for). Chosen for the seed detection checks this
 // package currently supports (Telnet, FTP) plus the usual suspects an
 // operator wants a quick signal on.
-var DefaultPorts = []int{21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443,
-	445, 587, 993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017}
+var DefaultPorts = []int{
+	21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 161, 389, 443,
+	445, 587, 636, 993, 995, 1433, 1521, 2375, 2376, 3000, 3306,
+	3389, 5432, 5672, 5678, 5900, 5984, 6333, 6379, 6443, 8080,
+	8443, 8500, 8888, 9000, 9090, 9200, 9443, 11211, 11434, 15672,
+	27017,
+}
 
 // Scanner runs a concurrent TCP-connect scan against one host.
 type Scanner struct {
