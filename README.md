@@ -18,6 +18,14 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 ## Install
 
 ```sh
+go install -v github.com/TyrusRC/groma/cmd/groma@latest
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/TyrusRC/groma.git
+cd groma
 go build -o groma ./cmd/groma
 ```
 
