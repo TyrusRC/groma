@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,6 +23,7 @@ import (
 	"github.com/TyrusRC/groma/internal/haruspex"
 	"github.com/TyrusRC/groma/internal/nvd"
 	"github.com/TyrusRC/groma/internal/reporting"
+	"github.com/TyrusRC/groma/internal/targets"
 	"github.com/TyrusRC/groma/internal/tools/naabu"
 )
 
@@ -29,9 +33,12 @@ var (
 	scanChecksDir   string
 	scanFormat      string
 	scanFailOn      string
-	scanTimeout     time.Duration
-	scanConcurrency int
-	scanRate        int
+	scanScanType        string
+	scanTimeout         time.Duration
+	scanConcurrency     int
+	scanHostConcurrency int
+	scanTargetFile      string
+	scanRate            int
 	scanHaruspexURL string
 	scanNoTriage    bool
 
@@ -67,9 +74,9 @@ func guessServiceByPort(port int) string {
 }
 
 var scanCmd = &cobra.Command{
-	Use:   "scan <host> [host...]",
-	Short: "Scan one or more hosts for open ports, services, and known vulnerabilities",
-	Args:  cobra.MinimumNArgs(1),
+	Use:   "scan <host|CIDR|range> [target...]",
+	Short: "Scan hosts, subnets (CIDR), or IP ranges for open ports, services, and known vulnerabilities",
+	Args:  cobra.ArbitraryArgs,
 	RunE:  runScan,
 }
 
@@ -79,8 +86,11 @@ func init() {
 	scanCmd.Flags().StringVar(&scanChecksDir, "checks", "", "directory of check YAML files to load and match (default: none — port/service discovery only)")
 	scanCmd.Flags().StringVar(&scanFormat, "format", "text", "output format: text, json, sarif")
 	scanCmd.Flags().StringVar(&scanFailOn, "fail-on", "", "exit code 2 if a finding at or above this severity is found (none|low|medium|high|critical)")
-	scanCmd.Flags().DurationVar(&scanTimeout, "timeout", 5*time.Minute, "scan timeout per host")
+	scanCmd.Flags().DurationVar(&scanTimeout, "timeout", 5*time.Minute, "scan timeout budget per host (the naabu batch gets host-count × this)")
 	scanCmd.Flags().IntVar(&scanConcurrency, "concurrency", 0, "worker concurrency passed to naabu (0 = auto, ulimit-aware)")
+	scanCmd.Flags().IntVar(&scanHostConcurrency, "host-concurrency", 0, "how many hosts to analyse in parallel (0 = auto); the native scanner's connection budget is bounded globally and separately")
+	scanCmd.Flags().StringVar(&scanTargetFile, "target-file", "", "read additional targets (one host/CIDR/range per line; '-' reads stdin) in addition to any given as arguments")
+	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "connect", "naabu scan type: connect (no privileges, FP-free) or syn (faster, needs root/CAP_NET_RAW; auto-verified to kill SYN false positives)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
@@ -123,16 +133,31 @@ func runScan(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	start := time.Now()
-	var allFindings core.Findings
-	for _, host := range args {
-		findings, err := scanHost(ctx, host, checkList, compliancePolicy)
+	specs := append([]string{}, args...)
+	if scanTargetFile != "" {
+		fileSpecs, err := readTargetFile(scanTargetFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
-			continue
+			return err
 		}
-		allFindings = append(allFindings, findings...)
+		specs = append(specs, fileSpecs...)
 	}
+	if len(specs) == 0 {
+		return fmt.Errorf("no targets given: pass a host/CIDR/range argument or --target-file")
+	}
+
+	hosts, err := targets.Expand(specs)
+	if err != nil {
+		return fmt.Errorf("resolving targets: %w", err)
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("no targets to scan")
+	}
+	if verbose || len(hosts) > 1 {
+		fmt.Fprintf(os.Stderr, "groma: %d target(s) to scan\n", len(hosts))
+	}
+
+	start := time.Now()
+	allFindings, incomplete := scanTargets(ctx, hosts, checkList, compliancePolicy)
 	duration := time.Since(start)
 
 	if !scanNoTriage {
@@ -143,7 +168,7 @@ func runScan(_ *cobra.Command, args []string) error {
 		haruspex.TriageFindings(ctx, haruspex.NewClient(scanHaruspexURL), allFindings)
 	}
 
-	report := reporting.NewReport(args, allFindings, duration)
+	report := reporting.NewReport(specs, allFindings, duration)
 	if err := writeReport(report); err != nil {
 		return err
 	}
@@ -155,6 +180,12 @@ func runScan(_ *cobra.Command, args []string) error {
 	if fail {
 		threshold, _ := core.ParseSeverity(scanFailOn)
 		return &gateError{Threshold: threshold, Count: count}
+	}
+	// Fail closed: if the scan did not finish, a clean gate result is not
+	// trustworthy — an unscanned host could be the one with a critical
+	// finding. Only matters when a gate is actually in use (--fail-on).
+	if incomplete && scanFailOn != "" {
+		return fmt.Errorf("scan incomplete: results may be missing, failing the gate closed (raise --timeout or narrow the scan)")
 	}
 	return nil
 }
@@ -187,56 +218,204 @@ func writeReport(report *reporting.Report) error {
 	return nil
 }
 
-// scanHost discovers open ports (naabu if installed, else groma's native
-// TCP-connect fallback), runs the seed protocol checks and any loaded
-// YAML checks against whatever service data was identified, and returns
-// every finding. Both discovery paths run the same legacyprotocol checks
-// so a missing naabu install never silently drops coverage, only service
-// fingerprinting (and therefore CVE-matching) depth.
-func scanHost(ctx context.Context, host string, checkList []*checks.Check, compliancePolicy *compliance.Policy) (core.Findings, error) {
-	scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
-	defer cancel()
+// hostDiscovery is the per-host result of the port-discovery phase: the
+// open ports found, the service observations fed to the CVE engine, the
+// (service, port) candidates fed to the default-credential checker, and
+// the informational open_port findings.
+type hostDiscovery struct {
+	findings      core.Findings
+	portResults   []discovery.PortResult
+	observations  []checks.Observation
+	svcCandidates []svcCandidate
+}
 
-	var findings core.Findings
-	var portResults []discovery.PortResult
-	var observations []checks.Observation
-	var svcCandidates []svcCandidate
-
-	n := naabu.New()
-	if n.IsAvailable() {
-		results, err := n.Scan(scanCtx, host, naabuOptionsFor())
-		if err != nil {
-			// A timeout or a non-zero exit still leaves naabu's results
-			// (whatever it reported before stopping) usable — surface
-			// the incompleteness, don't throw away real findings over it.
-			fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
-		}
-		for _, r := range results {
-			findings = append(findings, r.ToFinding(host))
-			portResults = append(portResults, discovery.PortResult{Port: r.Port, Open: true, Checked: true, Banner: r.Banner})
-			svc := strings.ToLower(r.Service)
-			if svc == "" {
-				svc = guessServiceByPort(r.Port)
-			}
-			svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: svc})
-		}
-		observations = checks.ObservationsFromNaabu(host, results)
+// scanTargets runs the whole pipeline over every host and returns all
+// findings in stable host order (regardless of completion order).
+//
+// It runs in two phases so each stays correctly resource-bounded:
+//  1. Discovery. With naabu installed, ONE process scans every host (its
+//     own rate limiter stays authoritative). Without it, the native
+//     TCP-connect scanner runs across hosts sharing a single global
+//     connection budget, so total in-flight connections never scale with
+//     the number of hosts.
+//  2. Analysis. Per-host service probing, CVE matching, credential checks
+//     and compliance run in a bounded worker pool.
+// scanTargets runs the whole pipeline and returns every finding in stable
+// host order plus an incomplete flag. incomplete is true when discovery
+// did not finish for at least one host (a naabu timeout/error, or native
+// ports left unreached); the caller fails a CI gate closed on it rather
+// than reporting a truncated scan as clean.
+func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check, compliancePolicy *compliance.Policy) (core.Findings, bool) {
+	var (
+		discovered map[string]*hostDiscovery
+		incomplete bool
+	)
+	if n := naabu.New(); n.IsAvailable() {
+		discovered, incomplete = discoverWithNaabu(ctx, n, hosts)
 	} else {
 		if verbose {
 			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to native TCP-connect scanner with banner fingerprinting")
 		}
-		ports, err := nativePortList()
-		if err != nil {
-			return nil, err
+		discovered, incomplete = discoverNative(ctx, hosts)
+	}
+
+	// Phase 2: analysis, bounded across hosts. Results land in a slice
+	// indexed by host order so output is deterministic.
+	perHost := make([]core.Findings, len(hosts))
+	var done int64
+	pool := make(chan struct{}, hostPoolSize(len(hosts)))
+	var wg sync.WaitGroup
+	for i, host := range hosts {
+		hd := discovered[host]
+		if hd == nil {
+			continue
 		}
-		results, err := discovery.NewScanner().Scan(scanCtx, host, ports)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
+		wg.Add(1)
+		pool <- struct{}{}
+		go func(i int, host string, hd *hostDiscovery) {
+			defer wg.Done()
+			defer func() { <-pool }()
+			perHost[i] = analyzeHost(ctx, host, hd, checkList, compliancePolicy)
+			if n := atomic.AddInt64(&done, 1); len(hosts) > 1 {
+				fmt.Fprintf(os.Stderr, "groma: analyzed %d/%d host(s)\r", n, len(hosts))
+			}
+		}(i, host, hd)
+	}
+	wg.Wait()
+	if len(hosts) > 1 {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	var all core.Findings
+	for _, f := range perHost {
+		all = append(all, f...)
+	}
+
+	// NVD runs once for the whole scan, not per host: a single client
+	// shares one rate-limit budget (the NVD free tier is 5 req/30s), and
+	// deduplicating CPEs across every host avoids re-querying a version
+	// that appears on many hosts. Running it inside the per-host pool
+	// would spin up one unsynchronized client per host and get throttled.
+	if scanNVD {
+		var allObs []checks.Observation
+		for _, host := range hosts {
+			if hd := discovered[host]; hd != nil {
+				allObs = append(allObs, hd.observations...)
+			}
 		}
-		for _, r := range results {
-			if r.Open {
-				findings = append(findings, r.ToFinding(host))
-				// Try banner fingerprint first, fall back to port guess.
+		all = append(all, queryNVD(ctx, allObs)...)
+	}
+
+	return all, incomplete
+}
+
+// discoverWithNaabu runs one naabu process over every host and groups the
+// results back per host. The second return value is true if naabu did not
+// finish (timeout or non-zero exit), so the scan is incomplete.
+func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map[string]*hostDiscovery, bool) {
+	// --timeout is a per-host budget. One naabu process scans every host,
+	// so the batch gets host-count × that budget — otherwise a subnet
+	// scan would silently truncate at one host's worth of time and report
+	// unscanned hosts as clean, the exact false-negative a CI gate must
+	// never produce.
+	timeout := time.Duration(len(hosts)) * scanTimeout
+	scanCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	incomplete := false
+	results, err := n.ScanTargets(scanCtx, hosts, naabuOptionsFor())
+	if err != nil {
+		// Partial results on timeout/non-zero exit are still usable —
+		// surface the incompleteness, don't discard real findings.
+		fmt.Fprintf(os.Stderr, "groma: %v\n", err)
+		incomplete = true
+	}
+
+	// naabu reports the target it was given in the Host field (IP when
+	// scanned by IP); fall back to IP so every result lands somewhere.
+	byHost := map[string][]naabu.Result{}
+	known := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		known[h] = struct{}{}
+	}
+	for _, r := range results {
+		key := r.Host
+		if _, ok := known[key]; !ok {
+			if _, ok := known[r.IP]; ok {
+				key = r.IP
+			}
+		}
+		byHost[key] = append(byHost[key], r)
+	}
+
+	out := make(map[string]*hostDiscovery, len(hosts))
+	for _, host := range hosts {
+		hd := &hostDiscovery{}
+		for _, r := range byHost[host] {
+			hd.findings = append(hd.findings, r.ToFinding(host))
+			hd.portResults = append(hd.portResults, discovery.PortResult{Port: r.Port, Open: true, Checked: true, Banner: r.Banner})
+			svc := strings.ToLower(r.Service)
+			if svc == "" {
+				svc = guessServiceByPort(r.Port)
+			}
+			hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Service: svc})
+		}
+		hd.observations = checks.ObservationsFromNaabu(host, byHost[host])
+		enrichWithProbes(scanCtx, host, hd)
+		out[host] = hd
+	}
+	return out, incomplete
+}
+
+// discoverNative scans every host with the native TCP-connect scanner,
+// sharing ONE global connection budget across all hosts so the total
+// connection count is bounded regardless of how many hosts are scanned.
+// The second return value is true if any host's scan left ports
+// unreached (context ended early), so the scan is incomplete.
+func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscovery, bool) {
+	ports, err := nativePortList()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "groma: %v\n", err)
+		return map[string]*hostDiscovery{}, true
+	}
+
+	base := discovery.NewScanner()
+	gate := make(chan struct{}, max(1, base.Concurrency))
+
+	out := make(map[string]*hostDiscovery, len(hosts))
+	var mu sync.Mutex
+	var incomplete bool
+	var wg sync.WaitGroup
+	pool := make(chan struct{}, hostPoolSize(len(hosts)))
+	for _, host := range hosts {
+		wg.Add(1)
+		pool <- struct{}{}
+		go func(host string) {
+			defer wg.Done()
+			defer func() { <-pool }()
+
+			scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+			defer cancel()
+
+			sc := &discovery.Scanner{
+				DialTimeout: base.DialTimeout,
+				BannerWait:  base.BannerWait,
+				Retries:     base.Retries,
+				Gate:        gate, // shared global budget
+			}
+			results, err := sc.Scan(scanCtx, host, ports)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "groma: %s: %v\n", host, err)
+				mu.Lock()
+				incomplete = true
+				mu.Unlock()
+			}
+			hd := &hostDiscovery{portResults: results}
+			for _, r := range results {
+				if !r.Open {
+					continue
+				}
+				hd.findings = append(hd.findings, r.ToFinding(host))
 				svc := ""
 				if si := discovery.FingerprintBanner(r.Banner); si != nil {
 					svc = strings.ToLower(si.Product)
@@ -244,59 +423,65 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check, compl
 				if svc == "" {
 					svc = guessServiceByPort(r.Port)
 				}
-				svcCandidates = append(svcCandidates, svcCandidate{Port: r.Port, Service: svc})
+				hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Service: svc})
 			}
-		}
-		portResults = results
-		observations = checks.ObservationsFromBanners(host, portResults)
-	}
+			hd.observations = checks.ObservationsFromBanners(host, results)
+			enrichWithProbes(scanCtx, host, hd)
 
-	// Active service probing: if port discovery produced open ports but
-	// no service observations (naabu's -sV unavailable, or native scanner
-	// banners didn't match), run protocol-specific probes on each open
-	// port. This is the nmap technique: NULL probe → HTTP probe → TLS
-	// probe, matching responses against known service patterns.
-	if len(observations) == 0 && len(portResults) > 0 {
-		if verbose {
-			open := 0
-			for _, r := range portResults {
-				if r.Open {
-					open++
-				}
-			}
-			fmt.Fprintf(os.Stderr, "groma: running active service probes on %d open port(s)\n", open)
-		}
-		svcMap := discovery.ProbeResults(scanCtx, host, portResults)
-		// Rebuild observations and svcCandidates from probe results.
-		for i, r := range portResults {
-			if !r.Open {
-				continue
-			}
-			if si, ok := svcMap[r.Port]; ok && si != nil {
-				// Update the portResult banner for downstream use.
-				if si.Product != "" {
-					portResults[i].Banner = r.Banner
-				}
-			}
-		}
-		observations = checks.ObservationsFromProbes(host, portResults, svcMap)
-		// Update svcCandidates with probed service names.
-		for i, c := range svcCandidates {
-			if si, ok := svcMap[c.Port]; ok && si != nil && si.Product != "" {
-				svcCandidates[i].Service = strings.ToLower(si.Product)
-			}
+			mu.Lock()
+			out[host] = hd
+			mu.Unlock()
+		}(host)
+	}
+	wg.Wait()
+	return out, incomplete
+}
+
+// enrichWithProbes runs active service probes (nmap technique: NULL →
+// HTTP → TLS) when discovery found open ports but no service
+// observations, and folds the identified services back into the
+// observations and credential candidates.
+func enrichWithProbes(ctx context.Context, host string, hd *hostDiscovery) {
+	if len(hd.observations) != 0 || len(hd.portResults) == 0 {
+		return
+	}
+	open := 0
+	for _, r := range hd.portResults {
+		if r.Open {
+			open++
 		}
 	}
-
-	findings = append(findings, legacyprotocol.Detect(scanCtx, host, portResults)...)
-	findings = append(findings, checks.Evaluate(checkList, observations)...)
-
-	if scanNVD {
-		findings = append(findings, queryNVD(scanCtx, observations)...)
+	if open == 0 {
+		return
 	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "groma: %s: active service probes on %d open port(s)\n", host, open)
+	}
+	svcMap := discovery.ProbeResults(ctx, host, hd.portResults)
+	hd.observations = checks.ObservationsFromProbes(host, hd.portResults, svcMap)
+	for i, c := range hd.svcCandidates {
+		if si, ok := svcMap[c.Port]; ok && si != nil && si.Product != "" {
+			hd.svcCandidates[i].Service = strings.ToLower(si.Product)
+		}
+	}
+}
+
+// analyzeHost runs the post-discovery pipeline for one host: legacy
+// protocol checks, YAML CVE matching, optional NVD lookup, default-
+// credential checks, credentialed SSH audit and compliance.
+func analyzeHost(ctx context.Context, host string, hd *hostDiscovery, checkList []*checks.Check, compliancePolicy *compliance.Policy) core.Findings {
+	scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+	defer cancel()
+
+	findings := append(core.Findings{}, hd.findings...)
+	findings = append(findings, legacyprotocol.Detect(scanCtx, host, hd.portResults)...)
+	findings = append(findings, checks.Evaluate(checkList, hd.observations)...)
+
+	// NVD is deliberately NOT run here — it runs once for the whole scan
+	// in scanTargets so one rate-limit budget covers every host.
 
 	if scanCheckDefaultCreds {
-		findings = append(findings, checkDefaultCreds(scanCtx, host, svcCandidates)...)
+		findings = append(findings, checkDefaultCreds(scanCtx, host, hd.svcCandidates)...)
 	}
 
 	if scanSSHAudit {
@@ -306,9 +491,8 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check, compl
 			InsecureSkipHostKeyVerify: scanSSHInsecureHostKey,
 		})
 		if err != nil {
-			// Fail open on the SSH audit specifically: a credential/network
-			// problem on the credentialed pass must never drop the
-			// unauthenticated findings already collected above.
+			// Fail open: a credential/network problem on the credentialed
+			// pass must never drop the unauthenticated findings above.
 			fmt.Fprintf(os.Stderr, "groma: %s: credentialed audit skipped: %v\n", host, err)
 		} else {
 			findings = append(findings, checks.Evaluate(checkList, localObs)...)
@@ -318,16 +502,28 @@ func scanHost(ctx context.Context, host string, checkList []*checks.Check, compl
 	if compliancePolicy != nil {
 		complianceFindings, err := runCompliance(scanCtx, host, compliancePolicy)
 		if err != nil {
-			// Same fail-open posture as --ssh-audit: a credential/network
-			// problem on the compliance pass must never drop the findings
-			// already collected above.
 			fmt.Fprintf(os.Stderr, "groma: %s: compliance check skipped: %v\n", host, err)
 		} else {
 			findings = append(findings, complianceFindings...)
 		}
 	}
 
-	return findings, nil
+	return findings
+}
+
+// hostPoolSize bounds how many hosts are analysed (and, on the native
+// path, discovered) concurrently. The native scanner's connection budget
+// is gated globally and separately, so this only controls per-host work
+// like probing and credential checks.
+func hostPoolSize(n int) int {
+	if scanHostConcurrency > 0 {
+		return scanHostConcurrency
+	}
+	const auto = 20
+	if n < auto {
+		return max(1, n)
+	}
+	return auto
 }
 
 // runCompliance opens its own SSH connection (sharing the same
@@ -409,6 +605,12 @@ func naabuOptionsFor() naabu.Options {
 	if scanPorts != "" {
 		opts.Ports = scanPorts
 	}
+	switch strings.ToLower(scanScanType) {
+	case "syn", "s":
+		opts.ScanType = "s"
+	case "connect", "c", "":
+		opts.ScanType = "c"
+	}
 	if scanRate > 0 {
 		opts.Rate = scanRate
 	}
@@ -416,6 +618,34 @@ func naabuOptionsFor() naabu.Options {
 		opts.Concurrency = scanConcurrency
 	}
 	return opts
+}
+
+// readTargetFile reads target specs (one per line) from a file, or from
+// stdin when path is "-". Blank lines and '#' comments are ignored.
+func readTargetFile(path string) ([]string, error) {
+	f := os.Stdin
+	if path != "-" {
+		var err error
+		f, err = os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading --target-file %s: %w", path, err)
+		}
+		defer f.Close()
+	}
+	var specs []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		specs = append(specs, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading --target-file %s: %w", path, err)
+	}
+	return specs, nil
 }
 
 // nativePortList resolves the port set for the no-naabu fallback path.

@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -60,20 +61,29 @@ type Options struct {
 	CustomArgs []string
 }
 
-// DefaultOptions returns a fast triage baseline.
+// DefaultOptions returns a fast triage baseline. Verify is on so that IF
+// the caller switches to a SYN scan, every SYN-reported port is
+// re-confirmed with a full connect handshake before groma believes it —
+// SYN scans report a port open on a single unacknowledged probe and are
+// the source of naabu's false positives on rate-limited/dropping
+// networks. In the default connect mode -verify is a no-op (a completed
+// handshake already proves the port open), so it never slows the common
+// path (see BuildArgs).
 func DefaultOptions() Options {
 	return Options{
 		ScanType:   "c",
 		ExcludeCDN: true,
+		Verify:     true,
 	}
 }
 
-// FullRangeOptions returns exhaustive 1-65535.
+// FullRangeOptions returns an exhaustive 1-65535 sweep.
 func FullRangeOptions() Options {
 	return Options{
 		Ports:      "1-65535",
 		ScanType:   "c",
 		ExcludeCDN: false,
+		Verify:     true,
 	}
 }
 
@@ -148,7 +158,18 @@ func (n *Naabu) IsAvailable() bool { return n.binaryPath != "" }
 // omitted — they're broken in naabu 2.6.1. Service fingerprinting is
 // done by groma's native probe engine instead.
 func BuildArgs(host string, opts Options) []string {
-	args := []string{"-host", host, "-json", "-silent", "-duc", "-Pn"}
+	return buildArgs([]string{"-host", host}, opts)
+}
+
+// buildArgsList renders args that scan every host in a -list file in a
+// single naabu process (see ScanTargets).
+func buildArgsList(listPath string, opts Options) []string {
+	return buildArgs([]string{"-list", listPath}, opts)
+}
+
+func buildArgs(target []string, opts Options) []string {
+	args := append([]string{}, target...)
+	args = append(args, "-json", "-silent", "-duc", "-Pn")
 
 	if opts.Ports != "" {
 		args = append(args, "-p", opts.Ports)
@@ -185,7 +206,12 @@ func BuildArgs(host string, opts Options) []string {
 	if opts.DisplayCDN {
 		args = append(args, "-display-cdn")
 	}
-	if opts.Verify {
+	// -verify re-confirms each reported port with a full connect
+	// handshake. It only matters for SYN scans (where a port is reported
+	// open on a single unacknowledged probe); in connect mode the
+	// handshake already happened, so passing it would just double the
+	// work for no accuracy gain.
+	if opts.Verify && scanType == "s" {
 		args = append(args, "-verify")
 	}
 	if opts.Passive {
@@ -210,12 +236,49 @@ func BuildArgs(host string, opts Options) []string {
 	return args
 }
 
-// Scan runs naabu for port discovery and parses JSON output.
+// Scan runs naabu for port discovery against a single host and parses
+// JSON output.
 func (n *Naabu) Scan(ctx context.Context, host string, opts Options) ([]Result, error) {
 	if !n.IsAvailable() {
 		return nil, fmt.Errorf("naabu binary not found on $PATH")
 	}
-	cmd := exec.CommandContext(ctx, n.binaryPath, BuildArgs(host, opts)...)
+	return n.run(ctx, BuildArgs(host, opts))
+}
+
+// ScanTargets runs ONE naabu process over every host via a temp -list
+// file. Running a single process rather than one-per-host is deliberate:
+// naabu's own rate limiter and connection budget are per-process, so N
+// parallel processes would multiply the packet rate against the target
+// network by N — exactly the connection-flood behaviour the scanner is
+// supposed to avoid.
+func (n *Naabu) ScanTargets(ctx context.Context, hosts []string, opts Options) ([]Result, error) {
+	if !n.IsAvailable() {
+		return nil, fmt.Errorf("naabu binary not found on $PATH")
+	}
+	switch len(hosts) {
+	case 0:
+		return nil, nil
+	case 1:
+		return n.run(ctx, BuildArgs(hosts[0], opts))
+	}
+	f, err := os.CreateTemp("", "groma-targets-*.txt")
+	if err != nil {
+		return nil, fmt.Errorf("naabu target list: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(strings.Join(hosts, "\n") + "\n"); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("naabu target list: %w", err)
+	}
+	f.Close()
+	return n.run(ctx, buildArgsList(f.Name(), opts))
+}
+
+// run executes naabu with the given args and parses whatever it emitted.
+// Partial output on timeout or non-zero exit is kept and returned
+// alongside the error, never discarded.
+func (n *Naabu) run(ctx context.Context, args []string) ([]Result, error) {
+	cmd := exec.CommandContext(ctx, n.binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -235,12 +298,19 @@ func (n *Naabu) Scan(ctx context.Context, host string, opts Options) ([]Result, 
 	return results, nil
 }
 
-// ParseJSONLines converts naabu's -json stdout into Results.
+// ParseJSONLines converts naabu's -json stdout into Results, deduplicated
+// by (host, ip, port, protocol). naabu emits each open port more than
+// once — a scan pass and a retry/verify pass both print it — so without
+// deduplication every port would appear two or more times in the report.
+// When duplicates carry different data (one line has a banner or service
+// name the other lacks), their non-empty fields are merged so nothing is
+// lost to whichever copy happened to arrive first.
 func ParseJSONLines(raw string) []Result {
 	var out []Result
 	if raw == "" {
 		return out
 	}
+	index := map[string]int{} // dedup key -> position in out
 	sc := bufio.NewScanner(strings.NewReader(raw))
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -252,12 +322,43 @@ func ParseJSONLines(raw string) []Result {
 		if err := json.Unmarshal([]byte(line), &jl); err != nil {
 			continue
 		}
-		out = append(out, Result{
+		r := Result{
 			Host: jl.Host, IP: jl.IP, Port: jl.Port, Protocol: jl.Protocol,
 			IsCDN: jl.IsCDNIP, CDNName: jl.CDNName, Service: jl.Name,
 			Product: jl.Product, Version: jl.Version, ExtraInfo: jl.ExtraInfo,
 			Banner: jl.Banner, CPEs: jl.CPEs,
-		})
+		}
+		key := fmt.Sprintf("%s|%s|%d|%s", r.Host, r.IP, r.Port, r.Protocol)
+		if pos, ok := index[key]; ok {
+			mergeResult(&out[pos], r)
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, r)
 	}
 	return out
+}
+
+// mergeResult folds any field set on src but missing on dst into dst, so
+// a deduplicated port keeps service/banner data regardless of which
+// duplicate line carried it.
+func mergeResult(dst *Result, src Result) {
+	if dst.Service == "" {
+		dst.Service = src.Service
+	}
+	if dst.Product == "" {
+		dst.Product = src.Product
+	}
+	if dst.Version == "" {
+		dst.Version = src.Version
+	}
+	if dst.ExtraInfo == "" {
+		dst.ExtraInfo = src.ExtraInfo
+	}
+	if dst.Banner == "" {
+		dst.Banner = src.Banner
+	}
+	if len(dst.CPEs) == 0 {
+		dst.CPEs = src.CPEs
+	}
 }

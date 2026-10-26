@@ -107,6 +107,7 @@ func TestBuildArgsTopPortsIgnoredWhenPortsSet(t *testing.T) {
 
 func TestBuildArgsNewFlags(t *testing.T) {
 	args := BuildArgs("h", Options{
+		ScanType:            "s", // -verify only renders on a SYN scan
 		WarmUpTimeS:         5,
 		DisplayCDN:          true,
 		ServiceDiscovery:    true,
@@ -194,5 +195,44 @@ func TestToFindingIsInformational(t *testing.T) {
 	}
 	if f.Evidence != "Banner: 220 ready" {
 		t.Errorf("expected evidence to carry the banner, got %q", f.Evidence)
+	}
+}
+
+func TestParseJSONLinesDedupsDoubleEmittedPorts(t *testing.T) {
+	// naabu prints each open port on both a scan pass and a retry pass.
+	raw := `{"host":"h","ip":"1.2.3.4","port":22,"protocol":"tcp"}
+{"host":"h","ip":"1.2.3.4","port":80,"protocol":"tcp"}
+{"host":"h","ip":"1.2.3.4","port":22,"protocol":"tcp"}
+{"host":"h","ip":"1.2.3.4","port":80,"protocol":"tcp"}`
+	got := ParseJSONLines(raw)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 deduped results, got %d: %+v", len(got), got)
+	}
+}
+
+func TestParseJSONLinesMergesNonEmptyFieldsAcrossDuplicates(t *testing.T) {
+	// One copy carries a banner, the other doesn't; the banner must survive.
+	raw := `{"host":"h","ip":"1.2.3.4","port":22,"protocol":"tcp"}
+{"host":"h","ip":"1.2.3.4","port":22,"protocol":"tcp","banner":"OpenSSH_9.6","product":"OpenSSH"}`
+	got := ParseJSONLines(raw)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 deduped result, got %d", len(got))
+	}
+	if got[0].Banner != "OpenSSH_9.6" || got[0].Product != "OpenSSH" {
+		t.Errorf("merge lost banner/product: %+v", got[0])
+	}
+}
+
+func TestBuildArgsVerifyOnlyOnSynScan(t *testing.T) {
+	// Verify is a no-op in connect mode — the handshake already proves the
+	// port open, so passing -verify would just double the work.
+	connect := BuildArgs("h", Options{ScanType: "c", Verify: true})
+	if hasFlag(connect, "-verify") {
+		t.Errorf("connect scan should not pass -verify: %v", connect)
+	}
+	// On a SYN scan -verify kills false positives and must be passed.
+	syn := BuildArgs("h", Options{ScanType: "s", Verify: true})
+	if !hasFlag(syn, "-verify") {
+		t.Errorf("SYN scan with Verify must pass -verify: %v", syn)
 	}
 }

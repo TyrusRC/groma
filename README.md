@@ -4,16 +4,17 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 
 ## Features
 
-- **Full-range port scan** — default is 1-65535, not a top-100 sample
-- **Native service fingerprinting** — active probing (NULL → HTTP → TLS) with nmap-style banner matching, no external binary required
-- **[naabu](https://github.com/projectdiscovery/naabu) integration** — SYN-speed port discovery when available, native TCP-connect fallback when not
-- **NVD CVE lookup** — live query against NIST NVD API 2.0 with CPE matching, 200k+ CVE coverage, disk caching (`--nvd`)
-- **48 built-in YAML CVE checks** — OpenSSH, Apache, nginx, PostgreSQL, MySQL, Redis, Elasticsearch, Exim, Postfix, Dovecot, ProFTPD, vsftpd
-- **35+ default-credential checkers** — wire protocols (SSH, FTP, PostgreSQL, MySQL, Redis, MongoDB, MSSQL, VNC, LDAP, SNMP/UDP, Telnet, SMTP, Memcached) and HTTP services (Elasticsearch, Tomcat, Jenkins, Grafana, RabbitMQ, Docker, Kubernetes, Consul, MinIO, Portainer, Harbor, ArgoCD, Gitea, Jupyter, Ollama, ChromaDB, Qdrant, Airflow, Metabase, n8n, MLflow, Weaviate, Keycloak, Neo4j, InfluxDB). Pairs sourced from [SecLists](https://github.com/danielmiessler/SecLists)
-- **SSH credentialed audit** — `dpkg`/`rpm` package version matching through the same CVE engine
-- **CIS/DISA-STIG compliance** — Tenable `.audit` policy evaluation over SSH (`CMD_EXEC`/`FILE_CHECK`)
-- **[Haruspex](https://github.com/TyrusRC/haruspex) triage** — optional finding confidence scoring, fail-open
-- **Output** — text, JSON, SARIF 2.1.0
+- **Targets** — hosts, CIDR blocks, and IP ranges; `--target-file` (or stdin) for lists. Hosts scan in parallel under one global connection budget.
+- **Full range by default** — all 65535 TCP ports, not a top-N sample.
+- **Accurate, not sprayed** — connect scans confirm every open port with a real handshake, dropped probes are retried, and duplicate results are collapsed. `--scan-type syn` (root) auto-verifies each hit.
+- **Service fingerprinting** — active NULL → HTTP → TLS probing with nmap-style banner matching, no external binary required.
+- **[naabu](https://github.com/projectdiscovery/naabu)** — used for port discovery when on `$PATH`, native TCP-connect scanner otherwise.
+- **CVE matching** — built-in YAML checks plus live NVD lookup with CPE matching and on-disk caching (`--nvd`).
+- **Default credentials** — wire protocols and common HTTP services, vendor defaults only ([SecLists](https://github.com/danielmiessler/SecLists)).
+- **Credentialed audit** — SSH in and match installed `dpkg`/`rpm` versions through the same CVE engine.
+- **Compliance** — Tenable `.audit` CIS/DISA-STIG policies over SSH.
+- **Triage** — optional [Haruspex](https://github.com/TyrusRC/haruspex) confidence scoring, fail-open.
+- **Output** — text, JSON, SARIF 2.1.0.
 
 ## Install
 
@@ -36,6 +37,11 @@ Optional: [naabu](https://github.com/projectdiscovery/naabu) on `$PATH` for fast
 ```sh
 # basic scan
 ./groma scan 10.0.0.5
+
+# a whole subnet, or a range, or a file of targets
+./groma scan 10.0.0.0/24
+./groma scan 10.0.0.1-50
+./groma scan --target-file targets.txt
 
 # with CVE checks + NVD lookup
 ./groma scan --checks ./checks/examples --nvd 10.0.0.5
@@ -61,11 +67,14 @@ export GROMA_SSH_KEY=~/.ssh/id_ed25519
 --checks <dir>          YAML check directory
 --nvd                   live NVD CVE lookup (set GROMA_NVD_API_KEY for higher rate limits)
 --nvd-cache <dir>       NVD response cache (default ~/.cache/groma/nvd)
---check-default-creds   test 35+ services for vendor default credentials
+--check-default-creds   test services for vendor default credentials
 --ssh-audit             SSH in, audit installed packages against CVE checks
 --compliance <file>     Tenable .audit CIS/DISA-STIG policy
 --ports <spec>          port list/range (nmap format, default 1-65535)
 --fast                  top-N ports only
+--scan-type <type>      connect (default, no privileges) or syn (faster, needs root; auto-verified)
+--target-file <file>    read targets (one host/CIDR/range per line; '-' = stdin)
+--host-concurrency <n>  hosts analysed in parallel (0 = auto)
 --format <fmt>          text | json | sarif
 --fail-on <sev>         exit 2 if finding at/above severity (low|medium|high|critical)
 --haruspex-url <url>    Haruspex triage server
@@ -112,7 +121,7 @@ internal/
   tools/naabu/          naabu CLI wrapper for port discovery
   tools/nmap/           nmap XML parser (optional enrichment)
   sysnet/               ulimit-aware concurrency
-checks/examples/        48 CVE YAML checks
+checks/examples/        example CVE YAML checks
 ```
 
 ## License

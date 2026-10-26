@@ -9,6 +9,7 @@ package discovery
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -67,6 +68,22 @@ type Scanner struct {
 	DialTimeout time.Duration
 	BannerWait  time.Duration
 	Concurrency int
+
+	// Retries is the number of EXTRA dial attempts made when a connect
+	// times out (a dropped SYN on a lossy path). A refused/reset/
+	// unreachable answer is definitive and never retried. Without this a
+	// single dropped probe silently reports a genuinely-open port as
+	// closed — the "missed port" failure that makes a one-shot scan
+	// untrustworthy.
+	Retries int
+
+	// Gate, when non-nil, is a shared concurrency budget used INSTEAD of
+	// an internal per-host semaphore. The multi-host scan path passes one
+	// gate to every per-host Scanner so the total number of in-flight
+	// connections is bounded globally, not per host — N hosts each with
+	// their own budget would be N× the connection count against the
+	// network and can exhaust file descriptors.
+	Gate chan struct{}
 }
 
 // NewScanner returns a Scanner with sane defaults — concurrency is
@@ -90,6 +107,7 @@ func NewScanner() *Scanner {
 		DialTimeout: 2 * time.Second,
 		BannerWait:  1500 * time.Millisecond,
 		Concurrency: sysnet.RecommendedConcurrency(defaultConcurrency, maxConcurrency),
+		Retries:     1,
 	}
 }
 
@@ -107,7 +125,10 @@ func (s *Scanner) Scan(ctx context.Context, host string, ports []int) ([]PortRes
 		ports = DefaultPorts
 	}
 	results := make([]PortResult, len(ports))
-	sem := make(chan struct{}, max(1, s.Concurrency))
+	sem := s.Gate
+	if sem == nil {
+		sem = make(chan struct{}, max(1, s.Concurrency))
+	}
 	var wg sync.WaitGroup
 	for i, p := range ports {
 		wg.Add(1)
@@ -135,20 +156,39 @@ func (s *Scanner) Scan(ctx context.Context, host string, ports []int) ([]PortRes
 
 func (s *Scanner) scanOne(ctx context.Context, host string, port int) PortResult {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	d := net.Dialer{Timeout: s.DialTimeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		// A dead context, not a real refusal, is the likely cause once
-		// ctx has already ended — the dial may never have been attempted.
-		return PortResult{Port: port, Open: false, Checked: ctx.Err() == nil}
+	attempts := 1 + max(0, s.Retries)
+	for attempt := 0; attempt < attempts; attempt++ {
+		if ctx.Err() != nil {
+			// Context ended before this attempt — the port was never
+			// actually reached, so its status is unknown, not closed.
+			return PortResult{Port: port, Open: false, Checked: false}
+		}
+		d := net.Dialer{Timeout: s.DialTimeout}
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			r := PortResult{Port: port, Open: true, Checked: true}
+			_ = conn.SetReadDeadline(time.Now().Add(s.BannerWait))
+			line, _ := bufio.NewReader(conn).ReadString('\n')
+			r.Banner = trimBanner(line)
+			conn.Close()
+			return r
+		}
+		if ctx.Err() != nil {
+			return PortResult{Port: port, Open: false, Checked: false}
+		}
+		// A timeout is the only retryable outcome: on a dropping path a
+		// genuinely-open port can swallow one SYN. A refused/reset/
+		// unreachable answer is definitive — the port is closed, and
+		// retrying only wastes time, so return immediately.
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			continue
+		}
+		return PortResult{Port: port, Open: false, Checked: true}
 	}
-	defer conn.Close()
-	r := PortResult{Port: port, Open: true, Checked: true}
-	_ = conn.SetReadDeadline(time.Now().Add(s.BannerWait))
-	reader := bufio.NewReader(conn)
-	line, _ := reader.ReadString('\n')
-	r.Banner = trimBanner(line)
-	return r
+	// Every attempt timed out: the port is filtered/dropped. We did fully
+	// attempt it, so this is a confirmed negative, not "never reached".
+	return PortResult{Port: port, Open: false, Checked: true}
 }
 
 func trimBanner(s string) string {
