@@ -36,19 +36,17 @@ Optional: [naabu](https://github.com/projectdiscovery/naabu) on `$PATH` for fast
 ## Usage
 
 ```sh
-# basic scan
+# scan a host — port discovery, service fingerprinting, bundled CVE
+# checks, live NVD lookup, and default-credential checks all run by default
 ./groma scan 10.0.0.5
 
-# a whole subnet, or a range, or a file of targets
+# a whole subnet, a range, or a file of targets — same defaults
 ./groma scan 10.0.0.0/24
 ./groma scan 10.0.0.1-50
 ./groma scan --target-file targets.txt
 
-# with CVE checks + NVD lookup
-./groma scan --checks ./checks/examples --nvd 10.0.0.5
-
-# default credential check
-./groma scan --check-default-creds 10.0.0.5
+# fully offline / lean (skip the network CVE lookup and cred checks)
+./groma scan --nvd=false --check-default-creds=false 10.0.0.5
 
 # credentialed audit
 export GROMA_SSH_USER=admin
@@ -59,16 +57,16 @@ export GROMA_SSH_KEY=~/.ssh/id_ed25519
 ./groma scan --compliance CIS_Ubuntu_22.04.audit 10.0.0.5
 
 # CI gate
-./groma scan --checks ./checks/examples --nvd --fail-on high -o report.json --format json 10.0.0.5
+./groma scan --fail-on high -o report.json --format json 10.0.0.5
 ```
 
 ### Flags
 
 ```
---checks <dir>          YAML check directory
---nvd                   live NVD CVE lookup (set GROMA_NVD_API_KEY for higher rate limits)
+--checks <dir>          YAML check directory (default: checks bundled into the binary)
+--nvd                   live NVD CVE lookup (default on; --nvd=false for offline)
 --nvd-cache <dir>       NVD response cache (default ~/.cache/groma/nvd)
---check-default-creds   test services for vendor default credentials
+--check-default-creds   test services for vendor default credentials (default on)
 --ssh-audit             SSH in, audit installed packages against CVE checks
 --compliance <file>     Tenable .audit CIS/DISA-STIG policy
 --ports <spec>          port list/range (nmap format, default 1-65535)

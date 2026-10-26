@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	embeddedchecks "github.com/TyrusRC/groma/checks"
 	"github.com/TyrusRC/groma/internal/audit"
 	"github.com/TyrusRC/groma/internal/checks"
 	"github.com/TyrusRC/groma/internal/compliance"
@@ -102,9 +103,9 @@ func init() {
 	scanCmd.Flags().IntVar(&scanSSHPort, "ssh-port", 22, "SSH port for --ssh-audit")
 	scanCmd.Flags().StringVar(&scanSSHKnownHosts, "ssh-known-hosts", "", "known_hosts path for --ssh-audit host key verification (default: ~/.ssh/known_hosts)")
 	scanCmd.Flags().BoolVar(&scanSSHInsecureHostKey, "ssh-insecure-host-key", false, "skip SSH host key verification for --ssh-audit (opt-in, lab/first-connect targets only — vulnerable to MITM)")
-	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", false, "bounded default-credential check for 35+ services (ssh, ftp, postgres, mysql, redis, mongodb, mssql, vnc, ldap, snmp, telnet, smtp, memcached, elasticsearch, grafana, jenkins, tomcat, rabbitmq, docker, k8s, consul, minio, portainer, harbor, argocd, jupyter, ollama, chromadb, airflow, and more); pair lists sourced from SecLists/Default-Credentials")
+	scanCmd.Flags().BoolVar(&scanCheckDefaultCreds, "check-default-creds", true, "bounded default-credential check for discovered services (on by default; --check-default-creds=false to skip); well-known vendor defaults only, stops on first hit, never sprays")
 	scanCmd.Flags().StringVar(&scanCompliancePath, "compliance", "", "path to a Tenable .audit CIS/DISA-STIG compliance policy to run over SSH (needs the same GROMA_SSH_* credentials as --ssh-audit; CMD_EXEC and FILE_CHECK only — see internal/compliance)")
-	scanCmd.Flags().BoolVar(&scanNVD, "nvd", false, "query the NIST NVD API for CVEs matching discovered service CPEs (live lookup, replaces hand-maintained YAML checks with 200k+ CVE coverage; set GROMA_NVD_API_KEY for higher rate limits)")
+	scanCmd.Flags().BoolVar(&scanNVD, "nvd", true, "query the NIST NVD API for CVEs matching discovered service CPEs (on by default, fail-open and cached; --nvd=false to skip for a fully offline scan; set GROMA_NVD_API_KEY for higher rate limits)")
 	scanCmd.Flags().StringVar(&scanNVDKey, "nvd-api-key", "", "NVD API key for higher rate limits (50 req/30s vs 5); also reads GROMA_NVD_API_KEY env var")
 	scanCmd.Flags().StringVar(&scanNVDCache, "nvd-cache", "", "directory to cache NVD responses (default: $HOME/.cache/groma/nvd)")
 	rootCmd.AddCommand(scanCmd)
@@ -122,6 +123,18 @@ func runScan(_ *cobra.Command, args []string) error {
 		checkList = loaded
 		if verbose {
 			fmt.Fprintf(os.Stderr, "groma: loaded %d check(s) from %s\n", len(checkList), scanChecksDir)
+		}
+	} else {
+		// No --checks given: use the CVE checks bundled into the binary so
+		// a bare `groma scan <target>` still matches known vulnerabilities
+		// with zero setup.
+		loaded, err := checks.LoadChecksFS(embeddedchecks.Examples, "examples")
+		if err != nil {
+			return fmt.Errorf("loading bundled checks: %w", err)
+		}
+		checkList = loaded
+		if verbose {
+			fmt.Fprintf(os.Stderr, "groma: loaded %d bundled check(s)\n", len(checkList))
 		}
 	}
 

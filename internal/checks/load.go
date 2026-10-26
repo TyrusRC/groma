@@ -2,6 +2,7 @@ package checks
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,8 +15,15 @@ import (
 // fails to load silently is a check that never runs, which is worse
 // than refusing to start.
 func LoadChecks(dir string) ([]*Check, error) {
+	return LoadChecksFS(os.DirFS(dir), ".")
+}
+
+// LoadChecksFS is LoadChecks over any fs.FS, so the bundled checks can be
+// parsed straight from an embed.FS with no files on disk (see the root
+// checks package). root is the directory within fsys to walk.
+func LoadChecksFS(fsys fs.FS, root string) ([]*Check, error) {
 	var out []*Check
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -26,7 +34,11 @@ func LoadChecks(dir string) ([]*Check, error) {
 		if ext != ".yaml" && ext != ".yml" {
 			return nil
 		}
-		c, loadErr := loadCheckFile(path)
+		data, readErr := fs.ReadFile(fsys, path)
+		if readErr != nil {
+			return fmt.Errorf("%s: %w", path, readErr)
+		}
+		c, loadErr := parseCheck(data)
 		if loadErr != nil {
 			return fmt.Errorf("%s: %w", path, loadErr)
 		}
@@ -39,11 +51,7 @@ func LoadChecks(dir string) ([]*Check, error) {
 	return out, nil
 }
 
-func loadCheckFile(path string) (*Check, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func parseCheck(data []byte) (*Check, error) {
 	var c Check
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, err
