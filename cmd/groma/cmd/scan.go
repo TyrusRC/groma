@@ -33,7 +33,8 @@ var (
 	scanFast        bool
 	scanChecksDir   string
 	scanFormat      string
-	scanFailOn      string
+	scanFailOn         string
+	scanFailOnUnproven bool
 	scanScanType        string
 	scanPing            bool
 	scanUDP             bool
@@ -88,7 +89,8 @@ func init() {
 	scanCmd.Flags().BoolVar(&scanFast, "fast", false, "scan only a top-N ports subset instead of the full 1-65535 default (quicker, NOT exhaustive)")
 	scanCmd.Flags().StringVar(&scanChecksDir, "checks", "", "directory of check YAML files to load and match (default: none — port/service discovery only)")
 	scanCmd.Flags().StringVar(&scanFormat, "format", "text", "output format: text, json, sarif")
-	scanCmd.Flags().StringVar(&scanFailOn, "fail-on", "", "exit code 2 if a finding at or above this severity is found (none|low|medium|high|critical)")
+	scanCmd.Flags().StringVar(&scanFailOn, "fail-on", "", "exit code 2 if a finding at or above this severity is found (none|low|medium|high|critical); unproven version-based findings are excluded unless --fail-on-unproven")
+	scanCmd.Flags().BoolVar(&scanFailOnUnproven, "fail-on-unproven", false, "also count unproven (version-based, possibly backport-patched) findings toward --fail-on")
 	scanCmd.Flags().DurationVar(&scanTimeout, "timeout", 5*time.Minute, "scan timeout budget per host (the naabu batch gets host-count × this)")
 	scanCmd.Flags().IntVar(&scanConcurrency, "concurrency", 0, "worker concurrency passed to naabu (0 = auto, ulimit-aware)")
 	scanCmd.Flags().IntVar(&scanHostConcurrency, "host-concurrency", 0, "how many hosts to analyse in parallel (0 = auto); the native scanner's connection budget is bounded globally and separately")
@@ -190,7 +192,7 @@ func runScan(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	fail, count, err := evaluateGate(allFindings, scanFailOn)
+	fail, count, err := evaluateGate(allFindings, scanFailOn, scanFailOnUnproven)
 	if err != nil {
 		return err
 	}

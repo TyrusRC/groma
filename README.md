@@ -77,7 +77,8 @@ export GROMA_SSH_KEY=~/.ssh/id_ed25519
 --target-file <file>    read targets (one host/CIDR/range per line; '-' = stdin)
 --host-concurrency <n>  hosts analysed in parallel (0 = auto)
 --format <fmt>          text | json | sarif
---fail-on <sev>         exit 2 if finding at/above severity (low|medium|high|critical)
+--fail-on <sev>         exit 2 if finding at/above severity (low|medium|high|critical); excludes unproven version-based findings
+--fail-on-unproven      also count unproven (version-based) findings toward --fail-on
 --haruspex-url <url>    Haruspex triage server
 --no-triage             skip Haruspex
 -o, --output <file>     output file

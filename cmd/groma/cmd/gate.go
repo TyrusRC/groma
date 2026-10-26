@@ -38,7 +38,12 @@ func ExitCode(err error) int {
 
 // evaluateGate reports whether findings should fail the run given the
 // --fail-on threshold. An empty value or "none" disables gating.
-func evaluateGate(findings core.Findings, failOn string) (fail bool, count int, err error) {
+//
+// Unless includeUnproven is set, findings triaged "unproven" (version-
+// based matches on distro-packaged hosts, which the distro may have
+// already backport-patched) do NOT trip the gate: a CI gate should fail
+// on confirmed issues, not on leads that still need --ssh-audit to prove.
+func evaluateGate(findings core.Findings, failOn string, includeUnproven bool) (fail bool, count int, err error) {
 	v := strings.ToLower(strings.TrimSpace(failOn))
 	if v == "" || v == "none" {
 		return false, 0, nil
@@ -47,6 +52,11 @@ func evaluateGate(findings core.Findings, failOn string) (fail bool, count int, 
 	if err != nil {
 		return false, 0, fmt.Errorf("invalid --fail-on value: %w", err)
 	}
-	count = len(findings.FilterByMinSeverity(threshold))
+	for _, f := range findings.FilterByMinSeverity(threshold) {
+		if !includeUnproven && f.Triage == "unproven" {
+			continue
+		}
+		count++
+	}
 	return count > 0, count, nil
 }
