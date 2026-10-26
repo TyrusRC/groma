@@ -34,6 +34,7 @@ var (
 	scanFormat      string
 	scanFailOn      string
 	scanScanType        string
+	scanPing            bool
 	scanTimeout         time.Duration
 	scanConcurrency     int
 	scanHostConcurrency int
@@ -91,6 +92,7 @@ func init() {
 	scanCmd.Flags().IntVar(&scanHostConcurrency, "host-concurrency", 0, "how many hosts to analyse in parallel (0 = auto); the native scanner's connection budget is bounded globally and separately")
 	scanCmd.Flags().StringVar(&scanTargetFile, "target-file", "", "read additional targets (one host/CIDR/range per line; '-' reads stdin) in addition to any given as arguments")
 	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "connect", "naabu scan type: connect (no privileges, FP-free) or syn (faster, needs root/CAP_NET_RAW; auto-verified to kill SYN false positives)")
+	scanCmd.Flags().BoolVar(&scanPing, "ping", false, "host discovery: skip targets that don't answer a quick TCP probe (faster on sparse subnets; a host firewalled on all common ports will be skipped, so off by default)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
@@ -153,7 +155,7 @@ func runScan(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("no targets to scan")
 	}
 	if verbose || len(hosts) > 1 {
-		fmt.Fprintf(os.Stderr, "groma: %d target(s) to scan\n", len(hosts))
+		fmt.Fprintf(os.Stderr, "groma: %d host(s) to scan\n", len(hosts))
 	}
 
 	start := time.Now()
@@ -250,6 +252,17 @@ type hostDiscovery struct {
 // ports left unreached); the caller fails a CI gate closed on it rather
 // than reporting a truncated scan as clean.
 func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check, compliancePolicy *compliance.Policy) (core.Findings, bool) {
+	if scanPing {
+		live := discovery.FilterAlive(ctx, hosts, 1*time.Second, hostPoolSize(len(hosts)))
+		if verbose || len(live) != len(hosts) {
+			fmt.Fprintf(os.Stderr, "groma: host discovery: %d/%d host(s) responded\n", len(live), len(hosts))
+		}
+		hosts = live
+		if len(hosts) == 0 {
+			return nil, false
+		}
+	}
+
 	var (
 		discovered map[string]*hostDiscovery
 		incomplete bool

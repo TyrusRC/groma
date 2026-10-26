@@ -73,6 +73,7 @@ export GROMA_SSH_KEY=~/.ssh/id_ed25519
 --ports <spec>          port list/range (nmap format, default 1-65535)
 --fast                  top-N ports only
 --scan-type <type>      connect (default, no privileges) or syn (faster, needs root; auto-verified)
+--ping                  host discovery: skip targets that don't answer a quick TCP probe
 --target-file <file>    read targets (one host/CIDR/range per line; '-' = stdin)
 --host-concurrency <n>  hosts analysed in parallel (0 = auto)
 --format <fmt>          text | json | sarif
