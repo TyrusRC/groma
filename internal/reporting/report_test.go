@@ -140,3 +140,49 @@ func TestRuleIDSlugifiesFindingType(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteTextGroupsByHostWorstFirstAndCollapsesOpenPorts(t *testing.T) {
+	// Host "10.0.0.9" has only an open port (info); host "10.0.0.5" has a
+	// critical. The critical host must appear first, and the bare open
+	// port must be collapsed onto the ports line, not expanded as a
+	// finding with its "Port 80/tcp open" title.
+	quiet := core.NewFinding("open_port", core.SeverityInfo)
+	quiet.Host, quiet.Port, quiet.Protocol = "10.0.0.9", 443, "tcp"
+	quiet.Title = "Port 443/tcp open"
+
+	r := NewReport([]string{"10.0.0.5", "10.0.0.9"}, append(sampleFindings(), quiet), time.Second)
+	var buf bytes.Buffer
+	if err := r.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText error: %v", err)
+	}
+	out := buf.String()
+
+	if i5, i9 := strings.Index(out, "10.0.0.5"), strings.Index(out, "10.0.0.9"); i5 == -1 || i9 == -1 || i5 > i9 {
+		t.Errorf("expected worst host (10.0.0.5) before quiet host (10.0.0.9), got:\n%s", out)
+	}
+	if !strings.Contains(out, "open:") {
+		t.Errorf("expected a collapsed open-ports line, got:\n%s", out)
+	}
+	if strings.Contains(out, "Port 443/tcp open") {
+		t.Errorf("bare open port should be collapsed, not expanded as a finding:\n%s", out)
+	}
+}
+
+func TestWriteTextNoColorByDefault(t *testing.T) {
+	r := NewReport([]string{"10.0.0.5"}, sampleFindings(), time.Second)
+	var buf bytes.Buffer
+	_ = r.WriteText(&buf)
+	if strings.Contains(buf.String(), "\x1b[") {
+		t.Errorf("Color defaults to false; no ANSI escapes expected:\n%q", buf.String())
+	}
+}
+
+func TestWriteTextColorWhenEnabled(t *testing.T) {
+	r := NewReport([]string{"10.0.0.5"}, sampleFindings(), time.Second)
+	r.Color = true
+	var buf bytes.Buffer
+	_ = r.WriteText(&buf)
+	if !strings.Contains(buf.String(), "\x1b[") {
+		t.Errorf("Color=true should emit ANSI escapes")
+	}
+}

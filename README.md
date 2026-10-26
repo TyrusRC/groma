@@ -14,7 +14,7 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 - **Credentialed audit** — SSH in and match installed `dpkg`/`rpm` versions through the same CVE engine.
 - **Compliance** — Tenable `.audit` CIS/DISA-STIG policies over SSH.
 - **Triage** — optional [Haruspex](https://github.com/TyrusRC/haruspex) confidence scoring, fail-open.
-- **Output** — text, JSON, SARIF 2.1.0.
+- **Output** — text (grouped by host, worst-first, color in a terminal), JSON, SARIF 2.1.0.
 
 ## Install
 

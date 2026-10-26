@@ -201,6 +201,10 @@ func writeReport(report *reporting.Report) error {
 		w = f
 	}
 
+	// Color only when writing to an interactive terminal (not a file or a
+	// pipe) and the operator hasn't opted out via NO_COLOR.
+	report.Color = output == "" && os.Getenv("NO_COLOR") == "" && isTerminal(os.Stdout)
+
 	var writeErr error
 	switch strings.ToLower(scanFormat) {
 	case "json":
@@ -618,6 +622,17 @@ func naabuOptionsFor() naabu.Options {
 		opts.Concurrency = scanConcurrency
 	}
 	return opts
+}
+
+// isTerminal reports whether f is an interactive terminal (a character
+// device), using only the standard library so groma keeps no extra
+// dependency just to decide whether to emit color.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // readTargetFile reads target specs (one per line) from a file, or from
