@@ -2,9 +2,9 @@
 // format: one YAML file per check, matched against an Observation (a
 // host's identified service — product/version/CPE, however it was
 // discovered: naabu's -sV fingerprint, a future banner-grab source, or
-// anything else). This mirrors assay's nuclei-compatible YAML templates
+// anything else). This mirrors vigil's nuclei-compatible YAML templates
 // in spirit and in the info/classification field names, so an operator
-// who already writes assay templates recognizes the shape immediately.
+// who already writes vigil templates recognizes the shape immediately.
 //
 // It is deliberately NOT a NASL-VM reimplementation: there is no
 // scripting language, no knowledge base, no execution-phase scheduler.
@@ -33,7 +33,7 @@ type Check struct {
 	Service ServiceMatch `yaml:"service"`
 }
 
-// Info mirrors assay's template Info block (same field names) so the
+// Info mirrors vigil's template Info block (same field names) so the
 // two YAML formats read the same way to someone maintaining both.
 type Info struct {
 	Name           string         `yaml:"name"`
@@ -45,7 +45,7 @@ type Info struct {
 	Classification Classification `yaml:"classification,omitempty"`
 }
 
-// Classification mirrors assay's Classification block.
+// Classification mirrors vigil's Classification block.
 type Classification struct {
 	CVEID       string  `yaml:"cve-id,omitempty"`
 	CWEID       string  `yaml:"cwe-id,omitempty"`

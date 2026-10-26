@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// Severity mirrors assay's core.Severity exactly, so a groma report and an
-// assay report rank and filter the same way in anything that consumes both
+// Severity mirrors vigil's core.Severity exactly, so a groma report and a
+// vigil report rank and filter the same way in anything that consumes both
 // (Praetor's import_scan_results already understands this five-level scale).
 type Severity string
 

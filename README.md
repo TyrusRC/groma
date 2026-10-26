@@ -1,6 +1,6 @@
 # groma
 
-Network vulnerability scanner. Discovers open ports, fingerprints services, checks for default credentials, and matches versions against CVEs. The network-lane counterpart to [assay](https://github.com/TyrusRC/assay) (web/DAST) — assay targets Acunetix's job, groma targets Nessus/OpenVAS.
+Network vulnerability scanner. Discovers open ports, fingerprints services, checks for default credentials, and matches versions against CVEs. The network-lane counterpart to [vigil](https://github.com/TyrusRC/vigil) (web/DAST) — vigil targets Acunetix's job, groma targets Nessus/OpenVAS.
 
 ## Features
 

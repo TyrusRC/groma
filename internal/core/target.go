@@ -7,7 +7,7 @@ import (
 )
 
 // Target represents a scan target: a host (IP or hostname), optionally with
-// an explicit port list. Unlike assay's URL-based Target, groma's unit of
+// an explicit port list. Unlike vigil's URL-based Target, groma's unit of
 // work is a host, not a page.
 type Target struct {
 	Host  string

@@ -9,7 +9,7 @@ import (
 )
 
 // Finding represents a discovered network/infrastructure issue. Shaped like
-// assay's core.Finding (same Severity/CWE/CVSS/remediation fields) so a
+// vigil's core.Finding (same Severity/CWE/CVSS/remediation fields) so a
 // consumer that already understands one understands the other, but the
 // location fields are network-native (Host/Port/Protocol/Service) instead
 // of (URL/Parameter).
