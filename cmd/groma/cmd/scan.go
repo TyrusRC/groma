@@ -338,7 +338,75 @@ func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check,
 		all = append(all, queryNVD(ctx, allObs)...)
 	}
 
-	return all, incomplete
+	// Mark version-based findings on distro-packaged hosts as unproven:
+	// distros backport security fixes without bumping the upstream version,
+	// so a version match there is a lead, not a confirmed vulnerability.
+	distroByHost := map[string]string{}
+	for host, hd := range discovered {
+		distroByHost[host] = detectDistro(hd.portResults)
+	}
+	for _, f := range all {
+		if distro := distroByHost[f.Host]; distro != "" && isVersionBased(f) {
+			markBackportUnproven(f, distro)
+		}
+	}
+
+	// Collapse the same CVE reported by both a bundled check and NVD.
+	return all.Dedup(), incomplete
+}
+
+// isVersionBased reports whether a finding was derived purely from a
+// service's reported version (a bundled CVE check or an NVD CPE match),
+// as opposed to an actively proven issue (open port, accepted default
+// credential). Only version-based findings are subject to the distro
+// backport caveat.
+func isVersionBased(f *core.Finding) bool {
+	return f.Tool == "nvd" || strings.HasPrefix(strings.ToUpper(f.Type), "CVE")
+}
+
+// markBackportUnproven downgrades confidence on a version-based finding
+// and records why, without removing it — the fix may genuinely be absent.
+func markBackportUnproven(f *core.Finding, distro string) {
+	if f.Triage == "" {
+		f.Triage = "unproven"
+		f.Confidence = 0.4
+	}
+	note := fmt.Sprintf("version-based match on a %s-packaged service; the distro may have backported the fix without changing the version — confirm with --ssh-audit", distro)
+	if f.Evidence == "" {
+		f.Evidence = note
+	} else {
+		f.Evidence += " — " + note
+	}
+}
+
+// detectDistro returns the OS distribution a host's services appear to be
+// packaged by (from banners like "Apache/2.4.7 (Ubuntu)" or
+// "OpenSSH_6.6.1p1 Ubuntu-..."), or "" if none is evident.
+func detectDistro(results []discovery.PortResult) string {
+	for _, r := range results {
+		if d := distroFromBanner(r.Banner); d != "" {
+			return d
+		}
+	}
+	return ""
+}
+
+func distroFromBanner(banner string) string {
+	b := strings.ToLower(banner)
+	switch {
+	case strings.Contains(b, "ubuntu"):
+		return "Ubuntu"
+	case strings.Contains(b, "debian"), strings.Contains(b, "+deb"):
+		return "Debian"
+	case strings.Contains(b, "(red hat)"), strings.Contains(b, "centos"),
+		strings.Contains(b, ".el6"), strings.Contains(b, ".el7"),
+		strings.Contains(b, ".el8"), strings.Contains(b, ".el9"):
+		return "Red Hat/CentOS"
+	case strings.Contains(b, "fedora"), strings.Contains(b, ".fc"):
+		return "Fedora"
+	default:
+		return ""
+	}
 }
 
 // discoverWithNaabu runs one naabu process over every host and groups the
@@ -789,6 +857,16 @@ func queryNVD(ctx context.Context, observations []checks.Observation) core.Findi
 	}
 	seen := map[string]*cpeObs{}
 	for _, obs := range observations {
+		// Without a concrete version the CPE collapses to a product
+		// wildcard, which makes NVD return every CVE ever filed against
+		// that product regardless of version — pure false positives. A
+		// version is required before we assert any CVE.
+		if strings.TrimSpace(obs.Version) == "" {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "groma: nvd: skipping %s on %s:%d (no version identified)\n", obs.Product, obs.Host, obs.Port)
+			}
+			continue
+		}
 		for _, cpe := range obs.CPEs {
 			// Convert CPE 2.2 URI (from naabu/banner fingerprint) to CPE
 			// 2.3 format that NVD API 2.0 requires, splicing in the

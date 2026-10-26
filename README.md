@@ -10,7 +10,7 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 - **Service fingerprinting** — active NULL → HTTP → TLS probing with nmap-style banner matching, no external binary required.
 - **UDP** — protocol-specific probes for DNS, NTP, and SNMP (`--udp`); a port is reported only on a valid reply, never a blind UDP sweep.
 - **[naabu](https://github.com/projectdiscovery/naabu)** — used for port discovery when on `$PATH`, native TCP-connect scanner otherwise.
-- **CVE matching** — built-in YAML checks plus live NVD lookup with CPE matching and on-disk caching (`--nvd`).
+- **CVE matching** — built-in YAML checks plus live NVD lookup with CPE matching and on-disk caching (`--nvd`). Fewer false positives: a CVE is never emitted without a concrete version, duplicates across sources are collapsed, and version-based matches on distro-packaged hosts are flagged *unproven* (distros backport fixes) — `--ssh-audit` confirms against real package versions.
 - **Default credentials** — wire protocols and common HTTP services, vendor defaults only ([SecLists](https://github.com/danielmiessler/SecLists)).
 - **Credentialed audit** — SSH in and match installed `dpkg`/`rpm` versions through the same CVE engine.
 - **Compliance** — Tenable `.audit` CIS/DISA-STIG policies over SSH.

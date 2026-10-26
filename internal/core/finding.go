@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -83,6 +84,50 @@ func (f Findings) SortBySeverity() {
 	sort.SliceStable(f, func(i, j int) bool {
 		return f[i].Severity.Rank() < f[j].Severity.Rank()
 	})
+}
+
+// Dedup collapses findings that describe the same issue at the same
+// location — same (Host, Port, Protocol, Type) — into one, so a CVE
+// reported by both a bundled check and the live NVD lookup appears once.
+// The first occurrence is kept and any field it is missing is filled from
+// a later duplicate, so no evidence, remediation, or score is lost to
+// whichever copy happened to come first. Order is preserved.
+func (f Findings) Dedup() Findings {
+	seen := make(map[string]*Finding, len(f))
+	out := make(Findings, 0, len(f))
+	for _, finding := range f {
+		key := fmt.Sprintf("%s|%d|%s|%s", finding.Host, finding.Port, finding.Protocol, finding.Type)
+		if first, ok := seen[key]; ok {
+			first.mergeFrom(finding)
+			continue
+		}
+		seen[key] = finding
+		out = append(out, finding)
+	}
+	return out
+}
+
+// mergeFrom fills fields empty on f from other.
+func (f *Finding) mergeFrom(other *Finding) {
+	if f.Description == "" {
+		f.Description = other.Description
+	}
+	if f.Evidence == "" {
+		f.Evidence = other.Evidence
+	}
+	if f.Remediation == "" {
+		f.Remediation = other.Remediation
+	}
+	if len(f.CWE) == 0 {
+		f.CWE = other.CWE
+	}
+	if f.CVSS == 0 {
+		f.CVSS = other.CVSS
+		f.CVSSVector = other.CVSSVector
+	}
+	if len(f.References) == 0 {
+		f.References = other.References
+	}
 }
 
 // FilterByMinSeverity returns findings at or above minSeverity (critical is
