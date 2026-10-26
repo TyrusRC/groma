@@ -35,6 +35,7 @@ var (
 	scanFailOn      string
 	scanScanType        string
 	scanPing            bool
+	scanUDP             bool
 	scanTimeout         time.Duration
 	scanConcurrency     int
 	scanHostConcurrency int
@@ -93,6 +94,7 @@ func init() {
 	scanCmd.Flags().StringVar(&scanTargetFile, "target-file", "", "read additional targets (one host/CIDR/range per line; '-' reads stdin) in addition to any given as arguments")
 	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "connect", "naabu scan type: connect (no privileges, FP-free) or syn (faster, needs root/CAP_NET_RAW; auto-verified to kill SYN false positives)")
 	scanCmd.Flags().BoolVar(&scanPing, "ping", false, "host discovery: skip targets that don't answer a quick TCP probe (faster on sparse subnets; a host firewalled on all common ports will be skipped, so off by default)")
+	scanCmd.Flags().BoolVar(&scanUDP, "udp", false, "also probe common UDP services (DNS, NTP, SNMP) with protocol-specific probes (only ports that give a valid reply are reported — no blind UDP sweep)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
@@ -379,6 +381,9 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 		}
 		hd.observations = checks.ObservationsFromNaabu(host, byHost[host])
 		enrichWithProbes(scanCtx, host, hd)
+		if scanUDP {
+			addUDPServices(scanCtx, host, hd)
+		}
 		out[host] = hd
 	}
 	return out, incomplete
@@ -444,6 +449,9 @@ func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscov
 			}
 			hd.observations = checks.ObservationsFromBanners(host, results)
 			enrichWithProbes(scanCtx, host, hd)
+			if scanUDP {
+				addUDPServices(scanCtx, host, hd)
+			}
 
 			mu.Lock()
 			out[host] = hd
@@ -452,6 +460,20 @@ func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscov
 	}
 	wg.Wait()
 	return out, incomplete
+}
+
+// addUDPServices probes common UDP services and records each one that
+// gives a valid protocol reply as an open udp port, feeding it to the
+// credential checker too (so e.g. SNMP default-community checks can run).
+func addUDPServices(ctx context.Context, host string, hd *hostDiscovery) {
+	for _, u := range discovery.ProbeUDP(ctx, host, 2*time.Second, nil) {
+		f := core.NewFinding("open_port", core.SeverityInfo)
+		f.Tool = "groma"
+		f.Host, f.Port, f.Protocol, f.Service = host, u.Port, "udp", u.Service
+		f.Title = fmt.Sprintf("Port %d/udp open (%s)", u.Port, u.Service)
+		hd.findings = append(hd.findings, f)
+		hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: u.Port, Service: u.Service})
+	}
 }
 
 // enrichWithProbes runs active service probes (nmap technique: NULL →

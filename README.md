@@ -8,6 +8,7 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 - **Full range by default** — all 65535 TCP ports, not a top-N sample.
 - **Accurate, not sprayed** — connect scans confirm every open port with a real handshake, dropped probes are retried, and duplicate results are collapsed. `--scan-type syn` (root) auto-verifies each hit.
 - **Service fingerprinting** — active NULL → HTTP → TLS probing with nmap-style banner matching, no external binary required.
+- **UDP** — protocol-specific probes for DNS, NTP, and SNMP (`--udp`); a port is reported only on a valid reply, never a blind UDP sweep.
 - **[naabu](https://github.com/projectdiscovery/naabu)** — used for port discovery when on `$PATH`, native TCP-connect scanner otherwise.
 - **CVE matching** — built-in YAML checks plus live NVD lookup with CPE matching and on-disk caching (`--nvd`).
 - **Default credentials** — wire protocols and common HTTP services, vendor defaults only ([SecLists](https://github.com/danielmiessler/SecLists)).
@@ -74,6 +75,7 @@ export GROMA_SSH_KEY=~/.ssh/id_ed25519
 --fast                  top-N ports only
 --scan-type <type>      connect (default, no privileges) or syn (faster, needs root; auto-verified)
 --ping                  host discovery: skip targets that don't answer a quick TCP probe
+--udp                   probe common UDP services (DNS, NTP, SNMP); only valid replies reported
 --target-file <file>    read targets (one host/CIDR/range per line; '-' = stdin)
 --host-concurrency <n>  hosts analysed in parallel (0 = auto)
 --format <fmt>          text | json | sarif
