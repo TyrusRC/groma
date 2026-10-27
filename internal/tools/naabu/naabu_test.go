@@ -87,6 +87,26 @@ func TestFullRangeOptionsCoversEveryPortAndSkipsNoHost(t *testing.T) {
 	}
 }
 
+func TestDefaultOptionSetsSetGenerousConnectTimeout(t *testing.T) {
+	// Regression guard: naabu's own 1000ms default silently drops every port
+	// on a high-latency / SYN-rate-limited host, reporting a live host as
+	// having zero open ports. Both baseline option sets must raise it (and
+	// pass retries) so the primary engine does not go blind.
+	for name, opts := range map[string]Options{"DefaultOptions": DefaultOptions(), "FullRangeOptions": FullRangeOptions()} {
+		args := BuildArgs("10.0.0.5", opts)
+		joined := strings.Join(args, " ")
+		if !hasFlag(args, "-timeout") {
+			t.Errorf("%s must set a connect -timeout above naabu's 1s default, got %q", name, joined)
+		}
+		if !hasFlag(args, "-retries") {
+			t.Errorf("%s must set -retries to ride out packet loss, got %q", name, joined)
+		}
+		if opts.TimeoutMS < 2000 {
+			t.Errorf("%s connect timeout %dms is too short to survive a slow RTT", name, opts.TimeoutMS)
+		}
+	}
+}
+
 func TestDefaultOptionsDoesNotClaimFullRange(t *testing.T) {
 	args := BuildArgs("10.0.0.5", DefaultOptions())
 	if hasFlag(args, "-p") {

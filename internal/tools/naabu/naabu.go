@@ -29,6 +29,19 @@ import (
 const (
 	defaultConcurrency = 25
 	maxConcurrency     = 1000
+
+	// connectTimeoutMS is how long a connect probe waits for a handshake.
+	// naabu's own default is 1000ms, which silently drops every port on a
+	// high-latency or SYN-rate-limited host (the handshake simply doesn't
+	// complete in time) and makes naabu report a live host as having zero
+	// open ports. 3000ms matches nmap's behaviour of waiting out a slow RTT
+	// and exceeds the native scanner's 2s, trading a longer tail wait on
+	// filtered ports — bounded by the send rate — for not missing ports.
+	// NOTE: fixed, not adaptive; a host slower than 3s still needs --timeout.
+	connectTimeoutMS = 3000
+	// connectRetries re-probes a non-responsive port to ride out packet
+	// loss on a dropping network before concluding it is closed/filtered.
+	connectRetries = 3
 )
 
 // Options configures a naabu run.
@@ -74,6 +87,8 @@ func DefaultOptions() Options {
 		ScanType:   "c",
 		ExcludeCDN: true,
 		Verify:     true,
+		TimeoutMS:  connectTimeoutMS,
+		Retries:    connectRetries,
 	}
 }
 
@@ -84,6 +99,8 @@ func FullRangeOptions() Options {
 		ScanType:   "c",
 		ExcludeCDN: false,
 		Verify:     true,
+		TimeoutMS:  connectTimeoutMS,
+		Retries:    connectRetries,
 	}
 }
 
