@@ -211,6 +211,15 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Always warn on an incomplete scan, not only under a gate: a run that
+	// hit the --timeout budget or was rate-limited/dropped by the target
+	// produces a report indistinguishable from a genuinely clean host, and
+	// silently presenting "no open ports" for a scan that never finished is
+	// the one false negative a scanner must never hand the user unflagged.
+	if incomplete {
+		fmt.Fprintln(os.Stderr, "groma: WARNING: scan did not complete — results may be partial. A host exceeded the --timeout budget or the target rate-limited/dropped probes; treat an empty or small result as unverified. Re-run with a higher --timeout, fewer targets at once, or (as root) --scan-type syn.")
+	}
+
 	fail, count, err := evaluateGate(allFindings, scanFailOn, scanFailOnUnproven)
 	if err != nil {
 		return err
@@ -305,6 +314,7 @@ func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check,
 	)
 	if n := naabu.New(); n.IsAvailable() {
 		discovered, incomplete = discoverWithNaabu(ctx, n, hosts)
+		discovered, incomplete = verifyNaabuMisses(ctx, hosts, discovered, incomplete)
 	} else {
 		if verbose {
 			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to native TCP-connect scanner with banner fingerprinting")
@@ -532,6 +542,58 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 	}
 	wg.Wait()
 	return out, incomplete
+}
+
+// verifyNaabuMisses re-scans, with the native connect scanner, any host
+// naabu reported no open ports on. naabu is non-deterministic on
+// high-latency or SYN-rate-limiting hosts: it can exit 0 having found
+// nothing on a host that is actually up (observed live: the same host
+// returning 0, then 3, open ports across back-to-back runs), and groma
+// would otherwise report that live host as clean — the one false negative
+// a security scanner must never produce. The native pass uses a longer
+// timeout and retries, so it catches what naabu's faster probes dropped.
+//
+// It is gated on a liveness probe so a genuinely empty subnet is not
+// re-scanned wholesale: only hosts that answer a common-port knock (with
+// a generous timeout, so a slow host is not mistaken for dead) are
+// re-scanned. NOTE: a host whose only open ports are unusual ones not in
+// the liveness set will still be judged down here — the inherent limit of
+// knock-based liveness, shared with nmap's default host discovery.
+func verifyNaabuMisses(ctx context.Context, hosts []string, discovered map[string]*hostDiscovery, incomplete bool) (map[string]*hostDiscovery, bool) {
+	var empty []string
+	for _, h := range hosts {
+		if hd := discovered[h]; hd == nil || countOpen(hd.portResults) == 0 {
+			empty = append(empty, h)
+		}
+	}
+	if len(empty) == 0 {
+		return discovered, incomplete
+	}
+	alive := discovery.FilterAlive(ctx, empty, 3*time.Second, hostPoolSize(len(empty)))
+	if len(alive) == 0 {
+		return discovered, incomplete
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "groma: naabu found no ports on %d live host(s); verifying with the native scanner\n", len(alive))
+	}
+	native, ninc := discoverNative(ctx, alive)
+	for h, hd := range native {
+		if hd != nil && countOpen(hd.portResults) > 0 {
+			discovered[h] = hd
+		}
+	}
+	return discovered, incomplete || ninc
+}
+
+// countOpen returns how many of results are open ports.
+func countOpen(results []discovery.PortResult) int {
+	n := 0
+	for _, r := range results {
+		if r.Open {
+			n++
+		}
+	}
+	return n
 }
 
 // discoverNative scans every host with the native TCP-connect scanner,

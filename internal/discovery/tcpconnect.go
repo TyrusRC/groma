@@ -104,7 +104,14 @@ type Scanner struct {
 // is capped at 1000 deliberately for that reason.
 func NewScanner() *Scanner {
 	return &Scanner{
-		DialTimeout: 2 * time.Second,
+		// 3s matches the naabu wrapper's connect timeout: a high-latency or
+		// SYN-rate-limited host often does not complete the handshake inside
+		// 2s, and since this scanner is also the verifier for ports naabu
+		// found nothing on, too short a timeout here would repeat naabu's
+		// blind spot. Retries stays at 1 — a second attempt rides out a
+		// single dropped packet without multiplying the wait on every
+		// filtered port, which a higher count would.
+		DialTimeout: 3 * time.Second,
 		BannerWait:  1500 * time.Millisecond,
 		Concurrency: sysnet.RecommendedConcurrency(defaultConcurrency, maxConcurrency),
 		Retries:     1,
