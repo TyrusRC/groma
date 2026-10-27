@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -366,6 +367,13 @@ func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check,
 		distroByHost[host] = detectDistro(hd.portResults)
 	}
 	for _, f := range all {
+		// Credentialed-audit findings (Protocol "local") read the real
+		// installed package version, not an unauthenticated banner, so the
+		// backport caveat does not apply — leaving them confirmed is exactly
+		// how --ssh-audit resolves a host the gate would otherwise skip.
+		if f.Protocol == "local" {
+			continue
+		}
 		if distro := distroByHost[f.Host]; distro != "" && isVersionBased(f) {
 			markBackportUnproven(f, distro)
 		}
@@ -397,6 +405,18 @@ func markBackportUnproven(f *core.Finding, distro string) {
 	} else {
 		f.Evidence += " — " + note
 	}
+}
+
+// canonHost returns a stable key for matching a scanner-reported address
+// against our target list. IP literals are normalised through netip so
+// differing textual forms (IPv6 zero-compression, casing, brackets) still
+// match; hostnames pass through unchanged.
+func canonHost(s string) string {
+	t := strings.TrimPrefix(strings.TrimSuffix(s, "]"), "[")
+	if a, err := netip.ParseAddr(t); err == nil {
+		return a.String()
+	}
+	return s
 }
 
 // detectDistro returns the OS distribution a host's services appear to be
@@ -454,16 +474,21 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 	// naabu reports the target it was given in the Host field (IP when
 	// scanned by IP); fall back to IP so every result lands somewhere.
 	byHost := map[string][]naabu.Result{}
-	known := make(map[string]struct{}, len(hosts))
+	// Match naabu's reported address back to our target spec by canonical
+	// form: an IPv6 target expands to netip's canonical text but naabu may
+	// echo it bracketed, zero-expanded or upper-cased, and a raw string
+	// compare would bucket the result under a key the analysis loop (which
+	// ranges over hosts) never reads — silently dropping every port.
+	known := make(map[string]string, len(hosts))
 	for _, h := range hosts {
-		known[h] = struct{}{}
+		known[canonHost(h)] = h
 	}
 	for _, r := range results {
 		key := r.Host
-		if _, ok := known[key]; !ok {
-			if _, ok := known[r.IP]; ok {
-				key = r.IP
-			}
+		if orig, ok := known[canonHost(r.Host)]; ok {
+			key = orig
+		} else if orig, ok := known[canonHost(r.IP)]; ok {
+			key = orig
 		}
 		byHost[key] = append(byHost[key], r)
 	}
@@ -728,7 +753,13 @@ func checkDefaultCreds(ctx context.Context, host string, candidates []svcCandida
 		if c.Service == "" {
 			continue
 		}
-		key := fmt.Sprintf("%s:%d", c.Service, c.Port)
+		proto := c.Protocol
+		if proto == "" {
+			proto = "tcp"
+		}
+		// Key on protocol too: the same service on the same port over tcp and
+		// udp (e.g. a tcp/udp 161 pair) are distinct targets to check.
+		key := fmt.Sprintf("%s:%d/%s", c.Service, c.Port, proto)
 		if seen[key] {
 			continue
 		}
@@ -741,10 +772,6 @@ func checkDefaultCreds(ctx context.Context, host string, candidates []svcCandida
 		}
 		if hit == nil {
 			continue
-		}
-		proto := c.Protocol
-		if proto == "" {
-			proto = "tcp"
 		}
 		f := core.NewFinding("default-credentials-"+hit.Service, core.SeverityCritical)
 		f.Tool = "groma"

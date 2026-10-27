@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/TyrusRC/groma/internal/core"
 )
 
 const fakeNVDResponse = `{
@@ -45,7 +47,7 @@ const fakeNVDResponse = `{
 }`
 
 func TestParseResponse(t *testing.T) {
-	matches, err := parseResponse([]byte(fakeNVDResponse))
+	matches, _, err := parseResponse([]byte(fakeNVDResponse))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -223,5 +225,63 @@ func TestCacheRespectedInQuery(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].ID != "CVE-FROM-CACHE" {
 		t.Errorf("expected cached result, got %v", matches)
+	}
+}
+
+func TestParseResponseCVSSv2FallbackAndTotal(t *testing.T) {
+	// A pre-2016-style CVE carrying ONLY a CVSS v2 metric must still get a
+	// score and a non-"low" severity, and parseResponse must report the
+	// query's total for pagination.
+	body := `{
+      "totalResults": 137,
+      "vulnerabilities": [
+        {"cve": {
+          "id": "CVE-2014-0001",
+          "descriptions": [{"lang":"en","value":"old bug"}],
+          "metrics": {"cvssMetricV2": [
+            {"baseSeverity":"HIGH","cvssData":{"baseScore":7.5,"vectorString":"AV:N/AC:L/Au:N/C:P/I:P/A:P"}}
+          ]}
+        }}
+      ]
+    }`
+	matches, total, err := parseResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseResponse error: %v", err)
+	}
+	if total != 137 {
+		t.Errorf("expected total 137 (for pagination), got %d", total)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+	if matches[0].CVSSv3Score != 7.5 {
+		t.Errorf("expected v2 baseScore 7.5 carried through, got %v", matches[0].CVSSv3Score)
+	}
+	if got := mapNVDSeverity(matches[0].Severity, matches[0].CVSSv3Score); got != core.SeverityHigh {
+		t.Errorf("a 7.5 v2 CVE should map to High, got %v", got)
+	}
+}
+
+func TestParseResponsePrefersCVSSv40(t *testing.T) {
+	// A CVE with both v4.0 and v3.1 must report the v4.0 score/severity.
+	body := `{
+      "totalResults": 1,
+      "vulnerabilities": [
+        {"cve": {
+          "id": "CVE-2024-9999",
+          "descriptions": [{"lang":"en","value":"new bug"}],
+          "metrics": {
+            "cvssMetricV40": [{"cvssData":{"baseScore":9.3,"baseSeverity":"CRITICAL","vectorString":"CVSS:4.0/AV:N"}}],
+            "cvssMetricV31": [{"cvssData":{"baseScore":7.5,"baseSeverity":"HIGH","vectorString":"CVSS:3.1/AV:N"}}]
+          }
+        }}
+      ]
+    }`
+	matches, _, err := parseResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseResponse error: %v", err)
+	}
+	if len(matches) != 1 || matches[0].CVSSv3Score != 9.3 || matches[0].Severity != "CRITICAL" {
+		t.Errorf("expected v4.0 score 9.3/CRITICAL to win over v3.1, got %+v", matches[0])
 	}
 }

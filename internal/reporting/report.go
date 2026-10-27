@@ -203,7 +203,7 @@ func (r *Report) summaryLine(c colors) string {
 	add(r.Summary.High, "high", c.high)
 	add(r.Summary.Medium, "medium", c.medium)
 	add(r.Summary.Low, "low", c.low)
-	add(r.Summary.Info, "info", c.dim)
+	add(r.Summary.Info, "info", c.info)
 	if len(parts) == 0 {
 		return "  no findings"
 	}
@@ -264,6 +264,8 @@ func (c colors) sev(s core.Severity) string {
 		return c.medium
 	case core.SeverityLow:
 		return c.low
+	case core.SeverityInfo:
+		return c.info
 	default:
 		return c.dim
 	}

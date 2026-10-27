@@ -32,7 +32,8 @@ const (
 	rateWindow         = 30 * time.Second
 	rateNoKey          = 5
 	rateWithKey        = 50
-	maxResultsPerQuery = 50
+	maxResultsPerQuery = 2000 // NVD API 2.0 maximum page size
+	maxCVEsPerCPE      = 10000 // safety cap on pagination for a single CPE
 )
 
 // Client queries the NVD API for CPE-matched CVEs.
@@ -76,25 +77,49 @@ type CVEMatch struct {
 	References  []string
 }
 
-// QueryByCPE looks up all CVEs that match the given CPE name string.
-// Results are cached on disk when CacheDir is set.
+// QueryByCPE looks up all CVEs that match the given CPE name string,
+// paginating until every result is collected (NVD caps a page at 2000;
+// an old, widely-vulnerable version easily exceeds that, and stopping at
+// one page would silently drop CVEs). Results are cached on disk as a
+// complete set when CacheDir is set.
 func (c *Client) QueryByCPE(ctx context.Context, cpeName string) ([]CVEMatch, error) {
 	if cached, ok := c.readCache(cpeName); ok {
 		return cached, nil
 	}
 
+	var all []CVEMatch
+	for startIndex := 0; ; {
+		matches, total, err := c.fetchPage(ctx, cpeName, startIndex)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, matches...)
+		startIndex += len(matches)
+		if len(matches) == 0 || startIndex >= total || startIndex >= maxCVEsPerCPE {
+			break
+		}
+	}
+
+	c.writeCache(cpeName, all)
+	return all, nil
+}
+
+// fetchPage retrieves one page of CVE results and the total count NVD
+// reports for the query.
+func (c *Client) fetchPage(ctx context.Context, cpeName string, startIndex int) ([]CVEMatch, int, error) {
 	if err := c.rateLimit(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	params := url.Values{}
 	params.Set("cpeName", cpeName)
 	params.Set("resultsPerPage", fmt.Sprintf("%d", maxResultsPerQuery))
+	params.Set("startIndex", fmt.Sprintf("%d", startIndex))
 
 	reqURL := c.BaseURL + "?" + params.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("nvd: building request: %w", err)
+		return nil, 0, fmt.Errorf("nvd: building request: %w", err)
 	}
 	if c.APIKey != "" {
 		req.Header.Set("apiKey", c.APIKey)
@@ -102,29 +127,22 @@ func (c *Client) QueryByCPE(ctx context.Context, cpeName string) ([]CVEMatch, er
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nvd: request failed: %w", err)
+		return nil, 0, fmt.Errorf("nvd: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("nvd: rate limited (HTTP %d)", resp.StatusCode)
+		return nil, 0, fmt.Errorf("nvd: rate limited (HTTP %d)", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nvd: API returned HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("nvd: API returned HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("nvd: reading response: %w", err)
+		return nil, 0, fmt.Errorf("nvd: reading response: %w", err)
 	}
-
-	matches, err := parseResponse(body)
-	if err != nil {
-		return nil, err
-	}
-
-	c.writeCache(cpeName, matches)
-	return matches, nil
+	return parseResponse(body)
 }
 
 // ToFindings converts NVD CVE matches into groma findings for a
@@ -175,14 +193,29 @@ type langString struct {
 }
 
 type cveMetrics struct {
-	V31 []metricEntry `json:"cvssMetricV31"`
-	V30 []metricEntry `json:"cvssMetricV30"`
+	V40 []metricEntry   `json:"cvssMetricV40"`
+	V31 []metricEntry   `json:"cvssMetricV31"`
+	V30 []metricEntry   `json:"cvssMetricV30"`
+	V2  []metricEntryV2 `json:"cvssMetricV2"`
 }
 
 type metricEntry struct {
 	CVSSData struct {
 		BaseScore    float64 `json:"baseScore"`
 		BaseSeverity string  `json:"baseSeverity"`
+		VectorString string  `json:"vectorString"`
+	} `json:"cvssData"`
+}
+
+// metricEntryV2 is the CVSS v2 metric. Many pre-2016 CVEs (exactly the
+// ones that affect the old software versions groma flags) carry only a v2
+// score; without this they'd fall through to a 0.0 score and be
+// mislabeled "low". In v2 the severity sits on the metric, not in
+// cvssData, and there is no "critical" rating.
+type metricEntryV2 struct {
+	BaseSeverity string `json:"baseSeverity"`
+	CVSSData     struct {
+		BaseScore    float64 `json:"baseScore"`
 		VectorString string  `json:"vectorString"`
 	} `json:"cvssData"`
 }
@@ -195,10 +228,10 @@ type cveRef struct {
 	URL string `json:"url"`
 }
 
-func parseResponse(body []byte) ([]CVEMatch, error) {
+func parseResponse(body []byte) ([]CVEMatch, int, error) {
 	var resp apiResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("nvd: parsing response: %w", err)
+		return nil, 0, fmt.Errorf("nvd: parsing response: %w", err)
 	}
 	var out []CVEMatch
 	for _, v := range resp.Vulns {
@@ -209,14 +242,27 @@ func parseResponse(body []byte) ([]CVEMatch, error) {
 				break
 			}
 		}
-		if len(v.CVE.Metrics.V31) > 0 {
+		// Prefer the newest CVSS version present: v4.0 (the current
+		// default) → v3.1 → v3.0 → v2.
+		switch {
+		case len(v.CVE.Metrics.V40) > 0:
+			m.CVSSv3Score = v.CVE.Metrics.V40[0].CVSSData.BaseScore
+			m.Severity = v.CVE.Metrics.V40[0].CVSSData.BaseSeverity
+			m.CVSSv3 = v.CVE.Metrics.V40[0].CVSSData.VectorString
+		case len(v.CVE.Metrics.V31) > 0:
 			m.CVSSv3Score = v.CVE.Metrics.V31[0].CVSSData.BaseScore
 			m.Severity = v.CVE.Metrics.V31[0].CVSSData.BaseSeverity
 			m.CVSSv3 = v.CVE.Metrics.V31[0].CVSSData.VectorString
-		} else if len(v.CVE.Metrics.V30) > 0 {
+		case len(v.CVE.Metrics.V30) > 0:
 			m.CVSSv3Score = v.CVE.Metrics.V30[0].CVSSData.BaseScore
 			m.Severity = v.CVE.Metrics.V30[0].CVSSData.BaseSeverity
 			m.CVSSv3 = v.CVE.Metrics.V30[0].CVSSData.VectorString
+		case len(v.CVE.Metrics.V2) > 0:
+			// Severity comes from the v2 baseScore via mapNVDSeverity
+			// (baseSeverity left as the API gives it, if any).
+			m.CVSSv3Score = v.CVE.Metrics.V2[0].CVSSData.BaseScore
+			m.Severity = v.CVE.Metrics.V2[0].BaseSeverity
+			m.CVSSv3 = v.CVE.Metrics.V2[0].CVSSData.VectorString
 		}
 		for _, w := range v.CVE.Weaknesses {
 			for _, d := range w.Description {
@@ -230,7 +276,7 @@ func parseResponse(body []byte) ([]CVEMatch, error) {
 		}
 		out = append(out, m)
 	}
-	return out, nil
+	return out, resp.TotalResults, nil
 }
 
 func mapNVDSeverity(nvdSev string, score float64) core.Severity {

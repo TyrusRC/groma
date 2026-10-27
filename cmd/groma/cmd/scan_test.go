@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+func TestCanonHostMatchesEquivalentAddressForms(t *testing.T) {
+	// The bug this guards: a target expands to netip's canonical IPv6 text,
+	// but a scanner may echo the same address bracketed, upper-cased or
+	// zero-expanded. If those don't canonicalise equal, the result is
+	// bucketed under a key the analysis loop never reads and silently lost.
+	pairs := [][2]string{
+		{"2001:db8::1", "[2001:db8::1]"},
+		{"2001:db8::1", "2001:DB8::1"},
+		{"2001:db8::1", "2001:db8:0:0:0:0:0:1"},
+		{"192.168.0.1", "192.168.0.1"},
+	}
+	for _, p := range pairs {
+		if canonHost(p[0]) != canonHost(p[1]) {
+			t.Errorf("canonHost(%q)=%q should equal canonHost(%q)=%q",
+				p[0], canonHost(p[0]), p[1], canonHost(p[1]))
+		}
+	}
+	// A hostname is not an IP literal and must pass through unchanged, not
+	// collapse into some other host's bucket.
+	if canonHost("scanme.nmap.org") != "scanme.nmap.org" {
+		t.Errorf("hostname should pass through unchanged, got %q", canonHost("scanme.nmap.org"))
+	}
+	if canonHost("a.example") == canonHost("b.example") {
+		t.Errorf("distinct hostnames must not share a key")
+	}
+}
+
 func TestParsePortSpecSingleAndList(t *testing.T) {
 	got, err := parsePortSpec("80,443,8080")
 	if err != nil {
