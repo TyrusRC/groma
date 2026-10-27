@@ -35,55 +35,52 @@ Optional: [naabu](https://github.com/projectdiscovery/naabu) on `$PATH` for fast
 
 ## Usage
 
-```sh
-# scan a host — port discovery, service fingerprinting, bundled CVE
-# checks, live NVD lookup, and default-credential checks all run by default
-./groma scan 10.0.0.5
+Give it a target. Everything runs automatically — port and service
+discovery, the bundled CVE checks, the live NVD lookup, default-credential
+checks, and UDP service probing. There are no flags to learn for a normal
+scan.
 
-# a whole subnet, a range, or a file of targets — same defaults
+```sh
+# a host, a subnet, a range, or a file of targets — all the same
+./groma scan 10.0.0.5
 ./groma scan 10.0.0.0/24
 ./groma scan 10.0.0.1-50
 ./groma scan --target-file targets.txt
+```
 
-# fully offline / lean (skip the network CVE lookup and cred checks)
-./groma scan --nvd=false --check-default-creds=false 10.0.0.5
+It adapts to its environment on its own:
 
-# credentialed audit
+- **Run as root** → SYN scan (faster, auto-verified to kill false
+  positives). Otherwise a no-privilege connect scan.
+- **`GROMA_SSH_*` set** → runs the credentialed package audit too, which
+  confirms version-based findings against the real installed versions.
+
+```sh
 export GROMA_SSH_USER=admin
 export GROMA_SSH_KEY=~/.ssh/id_ed25519
-./groma scan --checks ./checks/examples --ssh-audit 10.0.0.5
-
-# compliance
-./groma scan --compliance CIS_Ubuntu_22.04.audit 10.0.0.5
-
-# CI gate
-./groma scan --fail-on high -o report.json --format json 10.0.0.5
+./groma scan 10.0.0.5            # credentialed audit now runs automatically
 ```
 
 ### Flags
 
+The common ones — most scans need none of them:
+
 ```
---checks <dir>          YAML check directory (default: checks bundled into the binary)
---nvd                   live NVD CVE lookup (default on; --nvd=false for offline)
---nvd-cache <dir>       NVD response cache (default ~/.cache/groma/nvd)
---check-default-creds   test services for vendor default credentials (default on)
---ssh-audit             SSH in, audit installed packages against CVE checks
---compliance <file>     Tenable .audit CIS/DISA-STIG policy
 --ports <spec>          port list/range (nmap format, default 1-65535)
 --fast                  top-N ports only
---scan-type <type>      connect (default, no privileges) or syn (faster, needs root; auto-verified)
---ping                  host discovery: skip targets that don't answer a quick TCP probe
---udp                   probe common UDP services (DNS, NTP, SNMP); only valid replies reported
+--ping                  skip targets that don't answer a quick TCP probe (sparse subnets)
 --target-file <file>    read targets (one host/CIDR/range per line; '-' = stdin)
---host-concurrency <n>  hosts analysed in parallel (0 = auto)
+--compliance <file>     run a Tenable .audit CIS/DISA-STIG policy over SSH
+--fail-on <sev>         exit 2 on a confirmed finding at/above severity (low|medium|high|critical)
 --format <fmt>          text | json | sarif
---fail-on <sev>         exit 2 if finding at/above severity (low|medium|high|critical); excludes unproven version-based findings
---fail-on-unproven      also count unproven (version-based) findings toward --fail-on
---haruspex-url <url>    Haruspex triage server
---no-triage             skip Haruspex
 -o, --output <file>     output file
 -v, --verbose           verbose output
 ```
+
+Advanced overrides exist but are hidden from `--help` to keep it simple —
+e.g. `--nvd=false` / `--check-default-creds=false` / `--udp=false` for a
+lean or offline scan, `--scan-type`, `--fail-on-unproven`, and the naabu
+tuning flags (`--concurrency`, `--rate`, `--timeout`, …).
 
 ### Writing a check
 

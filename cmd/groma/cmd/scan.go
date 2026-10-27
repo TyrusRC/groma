@@ -95,9 +95,9 @@ func init() {
 	scanCmd.Flags().IntVar(&scanConcurrency, "concurrency", 0, "worker concurrency passed to naabu (0 = auto, ulimit-aware)")
 	scanCmd.Flags().IntVar(&scanHostConcurrency, "host-concurrency", 0, "how many hosts to analyse in parallel (0 = auto); the native scanner's connection budget is bounded globally and separately")
 	scanCmd.Flags().StringVar(&scanTargetFile, "target-file", "", "read additional targets (one host/CIDR/range per line; '-' reads stdin) in addition to any given as arguments")
-	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "connect", "naabu scan type: connect (no privileges, FP-free) or syn (faster, needs root/CAP_NET_RAW; auto-verified to kill SYN false positives)")
+	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "auto", "naabu scan type: auto (syn when run as root, else connect), connect, or syn")
 	scanCmd.Flags().BoolVar(&scanPing, "ping", false, "host discovery: skip targets that don't answer a quick TCP probe (faster on sparse subnets; a host firewalled on all common ports will be skipped, so off by default)")
-	scanCmd.Flags().BoolVar(&scanUDP, "udp", false, "also probe common UDP services (DNS, NTP, SNMP) with protocol-specific probes (only ports that give a valid reply are reported — no blind UDP sweep)")
+	scanCmd.Flags().BoolVar(&scanUDP, "udp", true, "probe common UDP services (DNS, NTP, SNMP) with protocol-specific probes (on by default; only ports that give a valid reply are reported — no blind UDP sweep)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
@@ -110,11 +110,28 @@ func init() {
 	scanCmd.Flags().BoolVar(&scanNVD, "nvd", true, "query the NIST NVD API for CVEs matching discovered service CPEs (on by default, fail-open and cached; --nvd=false to skip for a fully offline scan; set GROMA_NVD_API_KEY for higher rate limits)")
 	scanCmd.Flags().StringVar(&scanNVDKey, "nvd-api-key", "", "NVD API key for higher rate limits (50 req/30s vs 5); also reads GROMA_NVD_API_KEY env var")
 	scanCmd.Flags().StringVar(&scanNVDCache, "nvd-cache", "", "directory to cache NVD responses (default: $HOME/.cache/groma/nvd)")
+
+	// Keep `groma scan --help` short. Everything groma does — port +
+	// service discovery, bundled CVE checks, NVD, default-credential
+	// checks, UDP probing, and a credentialed audit when GROMA_SSH_* is
+	// set — runs automatically from just a target. The flags below are
+	// overrides for advanced use; they still work, they're just hidden
+	// from the default help so a new user never has to read them.
+	for _, hidden := range []string{
+		"scan-type", "udp", "nvd", "check-default-creds",
+		"ssh-audit", "ssh-port", "ssh-known-hosts", "ssh-insecure-host-key",
+		"checks", "concurrency", "host-concurrency", "rate", "timeout",
+		"nvd-api-key", "nvd-cache", "haruspex-url", "no-triage",
+		"fail-on-unproven",
+	} {
+		_ = scanCmd.Flags().MarkHidden(hidden)
+	}
 	rootCmd.AddCommand(scanCmd)
 }
 
-func runScan(_ *cobra.Command, args []string) error {
+func runScan(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
+	resolveAutoDefaults(cmd)
 
 	var checkList []*checks.Check
 	if scanChecksDir != "" {
@@ -740,6 +757,34 @@ func naabuOptionsFor() naabu.Options {
 		opts.Concurrency = scanConcurrency
 	}
 	return opts
+}
+
+// resolveAutoDefaults adapts the scan to its environment so a bare
+// `groma scan <target>` does the right thing with no flags: pick the
+// fastest scan type the privileges allow, and run the credentialed audit
+// automatically when SSH credentials are present in the environment.
+func resolveAutoDefaults(cmd *cobra.Command) {
+	if strings.EqualFold(scanScanType, "auto") {
+		if os.Geteuid() == 0 {
+			scanScanType = "syn"
+		} else {
+			scanScanType = "connect"
+		}
+		if verbose {
+			fmt.Fprintf(os.Stderr, "groma: scan-type auto → %s\n", scanScanType)
+		}
+	}
+
+	// A GROMA_SSH_USER in the environment is a clear signal the operator
+	// wants a credentialed audit; enable it automatically (it also
+	// confirms version-based findings against real package versions,
+	// resolving the "unproven" ones) unless they set the flag themselves.
+	if !cmd.Flags().Changed("ssh-audit") && os.Getenv("GROMA_SSH_USER") != "" {
+		scanSSHAudit = true
+		if verbose {
+			fmt.Fprintln(os.Stderr, "groma: GROMA_SSH_USER set → running credentialed SSH audit")
+		}
+	}
 }
 
 // isTerminal reports whether f is an interactive terminal (a character
