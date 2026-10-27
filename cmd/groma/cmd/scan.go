@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"strconv"
@@ -472,8 +473,21 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 	scanCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	opts := naabuOptionsFor()
+	// Size the connect timeout to the measured RTT rather than a fixed
+	// value: too short drops a slow host's handshakes (missed ports), too
+	// long blows this time budget on a drop-heavy host (truncated scan,
+	// also missed ports). Only connect scans dial a full handshake; a SYN
+	// scan keeps the option default.
+	if opts.ScanType == "c" {
+		opts.TimeoutMS = adaptiveConnectTimeoutMS(scanCtx, hosts)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "groma: adaptive connect timeout: %dms\n", opts.TimeoutMS)
+		}
+	}
+
 	incomplete := false
-	results, err := n.ScanTargets(scanCtx, hosts, naabuOptionsFor())
+	results, err := n.ScanTargets(scanCtx, hosts, opts)
 	if err != nil {
 		// Partial results on timeout/non-zero exit are still usable —
 		// surface the incompleteness, don't discard real findings.
@@ -542,6 +556,76 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 	}
 	wg.Wait()
 	return out, incomplete
+}
+
+// adaptiveConnectTimeoutMS probes the target's round-trip time and sizes
+// naabu's connect timeout to it. A fixed timeout cannot win: short enough
+// to finish a full-range sweep on a drop-heavy host within the budget is
+// too short to catch a slow host's handshakes, and long enough for the
+// slow host truncates the sweep on the drop-heavy one — both lose ports.
+// This is nmap's approach: fast host, short timeout; slow host, long one.
+func adaptiveConnectTimeoutMS(ctx context.Context, hosts []string) int {
+	return connectTimeoutForRTT(sampleRTT(ctx, hosts))
+}
+
+// connectTimeoutForRTT maps a measured RTT to a connect timeout in
+// milliseconds: 3x the RTT for handshake headroom, floored at 1s so a
+// fast host still tolerates a hiccup and capped at 4s so one slow host
+// cannot blow the time budget. A zero RTT (nothing answered the probe)
+// yields a conservative 1.5s that keeps a full-range sweep in budget.
+func connectTimeoutForRTT(rtt time.Duration) int {
+	if rtt <= 0 {
+		return 1500
+	}
+	ms := int(rtt/time.Millisecond) * 3
+	if ms < 1000 {
+		ms = 1000
+	}
+	if ms > 4000 {
+		ms = 4000
+	}
+	return ms
+}
+
+// sampleRTT returns the fastest successful TCP connect time to a common
+// port across a sample of the hosts, or 0 if none answer within the cap.
+// The fastest success approximates the base RTT; the connect timeout is
+// then scaled off it.
+func sampleRTT(ctx context.Context, hosts []string) time.Duration {
+	probePorts := []int{443, 80, 22, 8080, 3389, 25}
+	sample := hosts
+	if len(sample) > 4 {
+		sample = sample[:4]
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	best := make(chan time.Duration, 1)
+	var wg sync.WaitGroup
+	for _, h := range sample {
+		for _, p := range probePorts {
+			wg.Add(1)
+			go func(h string, p int) {
+				defer wg.Done()
+				start := time.Now()
+				var d net.Dialer
+				conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(h, strconv.Itoa(p)))
+				if err != nil {
+					return
+				}
+				conn.Close()
+				select {
+				case best <- time.Since(start):
+				default:
+				}
+			}(h, p)
+		}
+	}
+	go func() { wg.Wait(); close(best) }()
+	if d, ok := <-best; ok {
+		return d
+	}
+	return 0
 }
 
 // verifyNaabuMisses re-scans, with the native connect scanner, any host

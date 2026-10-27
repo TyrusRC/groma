@@ -3,6 +3,7 @@ package cmd
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestCanonHostMatchesEquivalentAddressForms(t *testing.T) {
@@ -29,6 +30,26 @@ func TestCanonHostMatchesEquivalentAddressForms(t *testing.T) {
 	}
 	if canonHost("a.example") == canonHost("b.example") {
 		t.Errorf("distinct hostnames must not share a key")
+	}
+}
+
+func TestConnectTimeoutForRTT(t *testing.T) {
+	cases := []struct {
+		name string
+		rtt  time.Duration
+		want int
+	}{
+		{"no answer -> conservative", 0, 1500},
+		{"localhost-fast -> floor", 300 * time.Microsecond, 1000},
+		{"low rtt still floored", 100 * time.Millisecond, 1000},
+		{"mid rtt scales 3x", 1 * time.Second, 3000},
+		{"slow rtt capped", 2 * time.Second, 4000},
+		{"very slow still capped", 10 * time.Second, 4000},
+	}
+	for _, c := range cases {
+		if got := connectTimeoutForRTT(c.rtt); got != c.want {
+			t.Errorf("%s: connectTimeoutForRTT(%v)=%d, want %d", c.name, c.rtt, got, c.want)
+		}
 	}
 }
 

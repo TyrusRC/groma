@@ -39,9 +39,16 @@ const (
 	// filtered ports — bounded by the send rate — for not missing ports.
 	// NOTE: fixed, not adaptive; a host slower than 3s still needs --timeout.
 	connectTimeoutMS = 3000
-	// connectRetries re-probes a non-responsive port to ride out packet
-	// loss on a dropping network before concluding it is closed/filtered.
-	connectRetries = 3
+	// connectRetries is deliberately 1, below naabu's own default of 3.
+	// Each retry re-sends the entire non-responded port set, and on a
+	// drop-heavy host (which never answers unused ports) that is ~65k extra
+	// probes per retry: at naabu's default 3 the full-range connect scan
+	// blows the per-host --timeout budget and returns PARTIAL results,
+	// missing real open ports — the regression this value prevents. One
+	// retry still rides out a single dropped handshake on a genuinely open
+	// port; the native verification pass and the incomplete-scan warning
+	// cover anything a lossier network still drops.
+	connectRetries = 1
 )
 
 // Options configures a naabu run.
