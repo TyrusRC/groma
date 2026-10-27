@@ -6,10 +6,10 @@ Network vulnerability scanner. Discovers open ports, fingerprints services, chec
 
 - **Targets** — hosts, CIDR blocks, and IP ranges; `--target-file` (or stdin) for lists. Hosts scan in parallel under one global connection budget.
 - **Full range by default** — all 65535 TCP ports, not a top-N sample.
-- **Accurate, not sprayed** — connect scans confirm every open port with a real handshake, dropped probes are retried, and duplicate results are collapsed. `--scan-type syn` (root) auto-verifies each hit.
-- **Service fingerprinting** — active NULL → HTTP → TLS probing with nmap-style banner matching, no external binary required.
+- **Native engine by default** — groma's own TCP-connect scanner runs every scan; no external binary required. [naabu](https://github.com/projectdiscovery/naabu) is used only for an explicit `--scan-type syn` (faster on large ranges, needs root), and even then its empty results are re-checked natively.
+- **Accurate, not sprayed** — every open port is confirmed with a real handshake; the connect timeout adapts to the target's measured RTT, so slow hosts aren't missed and fast ones aren't slowed; dropped probes are retried and duplicates collapsed. A scan that can't finish in its budget is flagged **incomplete** rather than reported as a clean host.
+- **Service fingerprinting** — active NULL → HTTP → TLS probing with nmap-style banner matching.
 - **UDP** — protocol-specific probes for DNS, NTP, and SNMP (`--udp`); a port is reported only on a valid reply, never a blind UDP sweep.
-- **[naabu](https://github.com/projectdiscovery/naabu)** — used for port discovery when on `$PATH`, native TCP-connect scanner otherwise.
 - **CVE matching** — built-in YAML checks plus live NVD lookup with CPE matching and on-disk caching (`--nvd`). Fewer false positives: a CVE is never emitted without a concrete version, duplicates across sources are collapsed, and version-based matches on distro-packaged hosts are flagged *unproven* (distros backport fixes) — `--ssh-audit` confirms against real package versions.
 - **Default credentials** — wire protocols and common HTTP services, vendor defaults only ([SecLists](https://github.com/danielmiessler/SecLists)).
 - **Credentialed audit** — SSH in and match installed `dpkg`/`rpm` versions through the same CVE engine.
@@ -31,7 +31,7 @@ cd groma
 go build -o groma ./cmd/groma
 ```
 
-Optional: [naabu](https://github.com/projectdiscovery/naabu) on `$PATH` for faster port discovery.
+Optional: [naabu](https://github.com/projectdiscovery/naabu) on `$PATH`, only for `--scan-type syn` (faster SYN sweeps on large ranges). Not needed for normal scans.
 
 ## Usage
 
@@ -50,8 +50,9 @@ scan.
 
 It adapts to its environment on its own:
 
-- **Run as root** → SYN scan (faster, auto-verified to kill false
-  positives). Otherwise a no-privilege connect scan.
+- **Default** → the native connect scanner: reliable, deterministic, no
+  external binary. For very large ranges, `--scan-type syn` (needs root
+  and naabu) is faster and auto-verifies each hit.
 - **`GROMA_SSH_*` set** → runs the credentialed package audit too, which
   confirms version-based findings against the real installed versions.
 
@@ -117,7 +118,7 @@ internal/
   compliance/           .audit CIS/DISA-STIG parser + evaluator
   haruspex/             finding triage client
   reporting/            text / JSON / SARIF output
-  tools/naabu/          naabu CLI wrapper for port discovery
+  tools/naabu/          naabu CLI wrapper (optional SYN scans only)
   tools/nmap/           nmap XML parser (optional enrichment)
   sysnet/               ulimit-aware concurrency
 checks/examples/        example CVE YAML checks
