@@ -98,7 +98,7 @@ func init() {
 	scanCmd.Flags().IntVar(&scanConcurrency, "concurrency", 0, "worker concurrency passed to naabu (0 = auto, ulimit-aware)")
 	scanCmd.Flags().IntVar(&scanHostConcurrency, "host-concurrency", 0, "how many hosts to analyse in parallel (0 = auto); the native scanner's connection budget is bounded globally and separately")
 	scanCmd.Flags().StringVar(&scanTargetFile, "target-file", "", "read additional targets (one host/CIDR/range per line; '-' reads stdin) in addition to any given as arguments")
-	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "auto", "naabu scan type: auto (syn when run as root, else connect), connect, or syn")
+	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "auto", "scan type: auto/connect (native engine, the reliable default) or syn (faster on large ranges, needs naabu + root)")
 	scanCmd.Flags().BoolVar(&scanPing, "ping", false, "host discovery: skip targets that don't answer a quick TCP probe (faster on sparse subnets; a host firewalled on all common ports will be skipped, so off by default)")
 	scanCmd.Flags().BoolVar(&scanUDP, "udp", true, "probe common UDP services (DNS, NTP, SNMP) with protocol-specific probes (on by default; only ports that give a valid reply are reported — no blind UDP sweep)")
 	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
@@ -313,18 +313,29 @@ func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check,
 		discovered map[string]*hostDiscovery
 		incomplete bool
 	)
-	if n := naabu.New(); n.IsAvailable() {
-		discovered, incomplete = discoverWithNaabu(ctx, n, hosts)
-		discovered, incomplete = verifyNaabuMisses(ctx, hosts, discovered, incomplete)
+	// Engine by scan type. The native TCP-connect scanner is the default:
+	// it is fully under groma's control, deterministic, and needs no
+	// external binary — so a bare `groma scan` never depends on naabu,
+	// whose results proved flaky and privilege/PATH-fragile. naabu is used
+	// ONLY for an explicit --scan-type syn, the one thing the native
+	// connect scanner cannot do; even then its blind spots are verified
+	// natively.
+	if st := strings.ToLower(scanScanType); st == "syn" || st == "s" {
+		if n := naabu.New(); n.IsAvailable() {
+			if verbose {
+				fmt.Fprintln(os.Stderr, "groma: SYN scan via naabu (with native verification of empty results)")
+			}
+			discovered, incomplete = discoverWithNaabu(ctx, n, hosts)
+			discovered, incomplete = verifyNaabuMisses(ctx, hosts, discovered, incomplete)
+		} else {
+			// SYN needs naabu (raw sockets); the native scanner is
+			// connect-only. Say so loudly rather than silently downgrading.
+			fmt.Fprintln(os.Stderr, "groma: WARNING: --scan-type syn needs naabu, which was not found; running the native connect scanner instead. Install naabu or put it on PATH (note: sudo's secure_path drops ~/go/bin).")
+			discovered, incomplete = discoverNative(ctx, hosts)
+		}
 	} else {
-		// A --scan-type syn request only works through naabu; the native
-		// scanner is connect-only. Say so loudly rather than silently
-		// downgrading — otherwise a user who ran as root specifically for a
-		// SYN scan gets a slow connect scan and no idea why.
-		if st := strings.ToLower(scanScanType); st == "syn" || st == "s" {
-			fmt.Fprintln(os.Stderr, "groma: WARNING: --scan-type syn needs naabu, which was not found; the native scanner does connect scans only, so a connect scan is running instead. Install naabu or put it on PATH (note: sudo's secure_path drops ~/go/bin).")
-		} else if verbose {
-			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to native TCP-connect scanner with banner fingerprinting")
+		if verbose {
+			fmt.Fprintln(os.Stderr, "groma: native TCP-connect scanner")
 		}
 		discovered, incomplete = discoverNative(ctx, hosts)
 	}
@@ -970,18 +981,22 @@ func naabuOptionsFor() naabu.Options {
 }
 
 // resolveAutoDefaults adapts the scan to its environment so a bare
-// `groma scan <target>` does the right thing with no flags: pick the
-// fastest scan type the privileges allow, and run the credentialed audit
-// automatically when SSH credentials are present in the environment.
+// `groma scan <target>` does the right thing with no flags: default to the
+// reliable, naabu-free native connect scanner, and run the credentialed
+// audit automatically when SSH credentials are present in the environment.
 func resolveAutoDefaults(cmd *cobra.Command) {
 	if strings.EqualFold(scanScanType, "auto") {
-		if os.Geteuid() == 0 {
-			scanScanType = "syn"
-		} else {
-			scanScanType = "connect"
-		}
+		// Default to connect (native engine) regardless of privileges.
+		// SYN is faster on large ranges but requires naabu, whose results
+		// are non-deterministic and PATH/privilege-fragile; it stays an
+		// explicit opt-in (--scan-type syn) rather than a silent default.
+		scanScanType = "connect"
 		if verbose {
-			fmt.Fprintf(os.Stderr, "groma: scan-type auto → %s\n", scanScanType)
+			hint := ""
+			if os.Geteuid() == 0 {
+				hint = " (run --scan-type syn for a faster SYN sweep via naabu)"
+			}
+			fmt.Fprintf(os.Stderr, "groma: scan-type auto → connect (native)%s\n", hint)
 		}
 	}
 
