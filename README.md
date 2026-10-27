@@ -80,8 +80,10 @@ The common ones — most scans need none of them:
 
 Advanced overrides exist but are hidden from `--help` to keep it simple —
 e.g. `--nvd=false` / `--check-default-creds=false` / `--udp=false` for a
-lean or offline scan, `--scan-type`, `--fail-on-unproven`, and the naabu
-tuning flags (`--concurrency`, `--rate`, `--timeout`, …).
+lean or offline scan, `--scan-type`, `--fail-on-unproven`, and the tuning
+flags (`--concurrency`, `--rate`, `--timeout`, …). `--rate` caps new
+connections/sec, spread evenly — set it to probe a host gently enough not to
+trip a rate-based block (it also passes through to naabu on a SYN scan).
 
 ### Writing a check
 

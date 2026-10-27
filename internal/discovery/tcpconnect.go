@@ -84,6 +84,16 @@ type Scanner struct {
 	// their own budget would be N× the connection count against the
 	// network and can exhaust file descriptors.
 	Gate chan struct{}
+
+	// Limiter, when non-nil, caps the rate at which NEW connections are
+	// started, spread evenly rather than bursted. It is shared across hosts
+	// like Gate. Gate bounds how many connections are in flight at once;
+	// Limiter bounds how fast new ones are opened — the distinction that
+	// matters against a target whose defenses trip on connections-per-second
+	// (a rate-based block) rather than on concurrent count. Off (nil) by
+	// default, so a normal scan runs at full speed; set it only for a host
+	// that must be probed gently.
+	Limiter *RateLimiter
 }
 
 // NewScanner returns a Scanner with sane defaults — concurrency is
@@ -138,6 +148,11 @@ func (s *Scanner) Scan(ctx context.Context, host string, ports []int) ([]PortRes
 	}
 	var wg sync.WaitGroup
 	for i, p := range ports {
+		// Pace new connections before taking a concurrency slot. On ctx end
+		// the remaining ports stay Checked=false and surface as incomplete.
+		if err := s.Limiter.Wait(ctx); err != nil {
+			break
+		}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i, p int) {

@@ -101,7 +101,7 @@ func init() {
 	scanCmd.Flags().StringVar(&scanScanType, "scan-type", "auto", "scan type: auto/connect (native engine, the reliable default) or syn (faster on large ranges, needs naabu + root)")
 	scanCmd.Flags().BoolVar(&scanPing, "ping", false, "host discovery: skip targets that don't answer a quick TCP probe (faster on sparse subnets; a host firewalled on all common ports will be skipped, so off by default)")
 	scanCmd.Flags().BoolVar(&scanUDP, "udp", true, "probe common UDP services (DNS, NTP, SNMP) with protocol-specific probes (on by default; only ports that give a valid reply are reported — no blind UDP sweep)")
-	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "packets/sec rate limit passed to naabu (0 = naabu's own default)")
+	scanCmd.Flags().IntVar(&scanRate, "rate", 0, "max new connections/sec, spread evenly (0 = unlimited). Caps the native engine and is passed to naabu as its packets/sec rate. Set it to scan a host gently enough not to trip a rate-based block.")
 	scanCmd.Flags().StringVar(&scanHaruspexURL, "haruspex-url", "", "Haruspex decision server base URL for finding triage (default: http://127.0.0.1:3000)")
 	scanCmd.Flags().BoolVar(&scanNoTriage, "no-triage", false, "skip Haruspex triage even if a server is reachable")
 	scanCmd.Flags().BoolVar(&scanSSHAudit, "ssh-audit", false, "credentialed local check: SSH into the host and version-match its installed packages (needs GROMA_SSH_USER + GROMA_SSH_PASSWORD/GROMA_SSH_KEY env vars, or a running ssh-agent)")
@@ -711,6 +711,10 @@ func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscov
 
 	base := discovery.NewScanner()
 	gate := make(chan struct{}, max(1, base.Concurrency))
+	// One shared rate cap across every host (nil/unlimited unless --rate set),
+	// so the limit is a total connections-per-second budget for the scan, not
+	// per host — the same reason the gate is shared.
+	limiter := discovery.NewRateLimiter(scanRate)
 
 	out := make(map[string]*hostDiscovery, len(hosts))
 	var mu sync.Mutex
@@ -731,7 +735,8 @@ func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscov
 				DialTimeout: base.DialTimeout,
 				BannerWait:  base.BannerWait,
 				Retries:     base.Retries,
-				Gate:        gate, // shared global budget
+				Gate:        gate,    // shared global concurrency budget
+				Limiter:     limiter, // shared global rate cap (nil = unlimited)
 			}
 			results, err := sc.Scan(scanCtx, host, ports)
 			if err != nil {
