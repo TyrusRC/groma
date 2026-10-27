@@ -950,6 +950,13 @@ func naabuOptionsFor() naabu.Options {
 	switch strings.ToLower(scanScanType) {
 	case "syn", "s":
 		opts.ScanType = "s"
+		// SYN retransmits are stateless and cheap (no socket is held, so
+		// they do not cost time budget the way connect retries do). On a
+		// host that drops probes under load a single try reads a dropped
+		// SYN-ACK as "closed" and loses real ports, so retry harder here —
+		// the opposite of the connect path, which keeps retries low to
+		// finish a full-range sweep in budget.
+		opts.Retries = naabu.SynRetries
 	case "connect", "c", "":
 		opts.ScanType = "c"
 	}

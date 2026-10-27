@@ -4,7 +4,29 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/TyrusRC/groma/internal/tools/naabu"
 )
+
+func TestNaabuOptionsForSynRetriesExceedConnect(t *testing.T) {
+	old := scanScanType
+	defer func() { scanScanType = old }()
+
+	scanScanType = "syn"
+	syn := naabuOptionsFor()
+	scanScanType = "connect"
+	conn := naabuOptionsFor()
+
+	if syn.ScanType != "s" {
+		t.Fatalf("syn ScanType=%q, want s", syn.ScanType)
+	}
+	if syn.Retries != naabu.SynRetries {
+		t.Errorf("syn retries=%d, want %d", syn.Retries, naabu.SynRetries)
+	}
+	if syn.Retries <= conn.Retries {
+		t.Errorf("SYN retries (%d) must exceed connect retries (%d): a dropped SYN-ACK on a defended host is lost without extra retransmits", syn.Retries, conn.Retries)
+	}
+}
 
 func TestCanonHostMatchesEquivalentAddressForms(t *testing.T) {
 	// The bug this guards: a target expands to netip's canonical IPv6 text,

@@ -51,6 +51,15 @@ const (
 	// port; the native verification pass and the incomplete-scan warning
 	// cover anything a lossier network still drops.
 	connectRetries = 1
+
+	// SynRetries is the retry count for SYN scans. A SYN retransmit holds
+	// no socket and costs almost no time, so unlike connect retries it does
+	// not threaten the full-range time budget — and on a host that
+	// rate-limits/drops under load, extra retransmits are what recover real
+	// ports whose SYN-ACK was dropped. Higher than connectRetries on
+	// purpose. Exported because the scan type (and thus this choice) is
+	// decided by the CLI layer.
+	SynRetries = 3
 )
 
 // Options configures a naabu run.
