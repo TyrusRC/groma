@@ -65,8 +65,9 @@ var (
 // when no fingerprint is available) — enough to decide whether a
 // default-credential check applies, without needing full -sV data.
 type svcCandidate struct {
-	Port    int
-	Service string
+	Port     int
+	Protocol string // "tcp" | "udp"
+	Service  string
 }
 
 // guessServiceByPort maps well-known ports to service names for hosts
@@ -383,13 +384,13 @@ func isVersionBased(f *core.Finding) bool {
 	return f.Tool == "nvd" || strings.HasPrefix(strings.ToUpper(f.Type), "CVE")
 }
 
-// markBackportUnproven downgrades confidence on a version-based finding
-// and records why, without removing it — the fix may genuinely be absent.
+// markBackportUnproven flags a version-based finding as unconfirmed and
+// records why, without removing it — the fix may genuinely be absent. It
+// sets the dedicated VersionUnconfirmed field (which the gate keys off)
+// rather than Triage, because the Haruspex triage step runs afterwards
+// and would overwrite Triage, silently re-arming the gate.
 func markBackportUnproven(f *core.Finding, distro string) {
-	if f.Triage == "" {
-		f.Triage = "unproven"
-		f.Confidence = 0.4
-	}
+	f.VersionUnconfirmed = true
 	note := fmt.Sprintf("version-based match on a %s-packaged service; the distro may have backported the fix without changing the version — confirm with --ssh-audit", distro)
 	if f.Evidence == "" {
 		f.Evidence = note
@@ -467,25 +468,44 @@ func discoverWithNaabu(ctx context.Context, n *naabu.Naabu, hosts []string) (map
 		byHost[key] = append(byHost[key], r)
 	}
 
+	// Build each host's discovery and run its active service/UDP probes in
+	// a bounded pool. naabu already found the ports in one process; the
+	// per-host probing that follows is network-bound, so running it
+	// serially would make a subnet scan take host-count × the probe time —
+	// the native path parallelizes the identical work, and so must this.
 	out := make(map[string]*hostDiscovery, len(hosts))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	pool := make(chan struct{}, hostPoolSize(len(hosts)))
 	for _, host := range hosts {
-		hd := &hostDiscovery{}
-		for _, r := range byHost[host] {
-			hd.findings = append(hd.findings, r.ToFinding(host))
-			hd.portResults = append(hd.portResults, discovery.PortResult{Port: r.Port, Open: true, Checked: true, Banner: r.Banner})
-			svc := strings.ToLower(r.Service)
-			if svc == "" {
-				svc = guessServiceByPort(r.Port)
+		wg.Add(1)
+		pool <- struct{}{}
+		go func(host string) {
+			defer wg.Done()
+			defer func() { <-pool }()
+
+			hd := &hostDiscovery{}
+			for _, r := range byHost[host] {
+				hd.findings = append(hd.findings, r.ToFinding(host))
+				hd.portResults = append(hd.portResults, discovery.PortResult{Port: r.Port, Open: true, Checked: true, Banner: r.Banner})
+				svc := strings.ToLower(r.Service)
+				if svc == "" {
+					svc = guessServiceByPort(r.Port)
+				}
+				hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Protocol: "tcp", Service: svc})
 			}
-			hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Service: svc})
-		}
-		hd.observations = checks.ObservationsFromNaabu(host, byHost[host])
-		enrichWithProbes(scanCtx, host, hd)
-		if scanUDP {
-			addUDPServices(scanCtx, host, hd)
-		}
-		out[host] = hd
+			hd.observations = checks.ObservationsFromNaabu(host, byHost[host])
+			enrichWithProbes(scanCtx, host, hd)
+			if scanUDP {
+				addUDPServices(scanCtx, host, hd)
+			}
+
+			mu.Lock()
+			out[host] = hd
+			mu.Unlock()
+		}(host)
 	}
+	wg.Wait()
 	return out, incomplete
 }
 
@@ -545,7 +565,7 @@ func discoverNative(ctx context.Context, hosts []string) (map[string]*hostDiscov
 				if svc == "" {
 					svc = guessServiceByPort(r.Port)
 				}
-				hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Service: svc})
+				hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: r.Port, Protocol: "tcp", Service: svc})
 			}
 			hd.observations = checks.ObservationsFromBanners(host, results)
 			enrichWithProbes(scanCtx, host, hd)
@@ -572,7 +592,7 @@ func addUDPServices(ctx context.Context, host string, hd *hostDiscovery) {
 		f.Host, f.Port, f.Protocol, f.Service = host, u.Port, "udp", u.Service
 		f.Title = fmt.Sprintf("Port %d/udp open (%s)", u.Port, u.Service)
 		hd.findings = append(hd.findings, f)
-		hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: u.Port, Service: u.Service})
+		hd.svcCandidates = append(hd.svcCandidates, svcCandidate{Port: u.Port, Protocol: "udp", Service: u.Service})
 	}
 }
 
@@ -722,9 +742,13 @@ func checkDefaultCreds(ctx context.Context, host string, candidates []svcCandida
 		if hit == nil {
 			continue
 		}
+		proto := c.Protocol
+		if proto == "" {
+			proto = "tcp"
+		}
 		f := core.NewFinding("default-credentials-"+hit.Service, core.SeverityCritical)
 		f.Tool = "groma"
-		f.Host, f.Port, f.Protocol, f.Service = host, c.Port, "tcp", hit.Service
+		f.Host, f.Port, f.Protocol, f.Service = host, c.Port, proto, hit.Service
 		f.Title = fmt.Sprintf("Default credentials accepted on %s", hit.Service)
 		f.Description = fmt.Sprintf("The %s service accepted a well-known default credential. "+
 			"An attacker with network access can authenticate using this publicly known pair.", hit.Service)

@@ -53,7 +53,7 @@ func evaluateGate(findings core.Findings, failOn string, includeUnproven bool) (
 		return false, 0, fmt.Errorf("invalid --fail-on value: %w", err)
 	}
 	for _, f := range findings.FilterByMinSeverity(threshold) {
-		if !includeUnproven && f.Triage == "unproven" {
+		if !includeUnproven && f.VersionUnconfirmed {
 			continue
 		}
 		count++

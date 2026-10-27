@@ -1,8 +1,10 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,7 +75,7 @@ func ProbeUDP(ctx context.Context, host string, timeout time.Duration, gate chan
 
 func probeOneUDP(ctx context.Context, host string, p udpProbe, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(host, itoa(p.port)))
+	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(host, strconv.Itoa(p.port)))
 	if err != nil {
 		return false
 	}
@@ -165,7 +167,17 @@ func snmpGetPublic() []byte {
 	}
 }
 
-func validSNMPResponse(_, got []byte) bool {
-	// A response is an ASN.1 SEQUENCE that contains the community string.
-	return len(got) > 2 && got[0] == 0x30 && strings.Contains(string(got), "public")
+func validSNMPResponse(sent, got []byte) bool {
+	if len(got) < 2 || got[0] != 0x30 {
+		return false
+	}
+	// Reject a datagram that merely echoes our probe back: an echo/reflect
+	// service would otherwise pass (our payload itself is a 0x30 sequence
+	// containing "public"), which is the UDP false positive to avoid.
+	if bytes.Equal(got, sent) {
+		return false
+	}
+	// A genuine reply is a GetResponse PDU (BER tag 0xa2), not the
+	// GetRequest (0xa0) we sent — require it, plus the community echo.
+	return bytes.Contains(got, []byte{0xa2}) && strings.Contains(string(got), "public")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -44,7 +45,7 @@ func IsAlive(ctx context.Context, host string, timeout time.Duration, gate chan 
 				}
 			}
 			d := net.Dialer{Timeout: timeout}
-			conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, itoa(port)))
+			conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 			if err == nil {
 				conn.Close()
 				select {
@@ -110,17 +111,3 @@ func FilterAlive(ctx context.Context, hosts []string, timeout time.Duration, hos
 	return live
 }
 
-// itoa avoids a fmt.Sprintf allocation on the hot probe path.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [5]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
-}

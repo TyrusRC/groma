@@ -39,6 +39,15 @@ type Finding struct {
 	Triage     string  `json:"triage,omitempty"`     // "confirmed" | "likely_noise" | "unproven" | "" (not triaged)
 	Confidence float64 `json:"confidence,omitempty"` // Haruspex P(yes) this is a real, reportable finding
 
+	// VersionUnconfirmed marks a finding derived purely from a service's
+	// reported version where that version can't be trusted — a distro that
+	// backports fixes without bumping the version. It is independent of
+	// Haruspex's Triage (which the triage step may overwrite): the CI gate
+	// keys off this field, so an unconfirmed backport-suspect CVE never
+	// trips --fail-on unless --fail-on-unproven is set. Cleared only by a
+	// credentialed audit that reads the real installed version.
+	VersionUnconfirmed bool `json:"version_unconfirmed,omitempty"`
+
 	CWE        []string `json:"cwe,omitempty"`
 	CVSS       float64  `json:"cvss,omitempty"`
 	CVSSVector string   `json:"cvss_vector,omitempty"`
@@ -127,6 +136,11 @@ func (f *Finding) mergeFrom(other *Finding) {
 	}
 	if len(f.References) == 0 {
 		f.References = other.References
+	}
+	// Unconfirmed is a safety flag: if either copy is unconfirmed, the
+	// merged finding is too.
+	if other.VersionUnconfirmed {
+		f.VersionUnconfirmed = true
 	}
 }
 

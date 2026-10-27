@@ -6,15 +6,15 @@ import (
 	"github.com/TyrusRC/groma/internal/core"
 )
 
-func critFinding(triage string) *core.Finding {
+func critFinding(unconfirmed bool) *core.Finding {
 	f := core.NewFinding("CVE-2024-0001", core.SeverityCritical)
 	f.Host = "10.0.0.5"
-	f.Triage = triage
+	f.VersionUnconfirmed = unconfirmed
 	return f
 }
 
 func TestEvaluateGateExcludesUnprovenByDefault(t *testing.T) {
-	findings := core.Findings{critFinding("unproven")}
+	findings := core.Findings{critFinding(true)}
 
 	fail, count, err := evaluateGate(findings, "high", false)
 	if err != nil {
@@ -32,7 +32,7 @@ func TestEvaluateGateExcludesUnprovenByDefault(t *testing.T) {
 }
 
 func TestEvaluateGateTripsOnConfirmedFinding(t *testing.T) {
-	findings := core.Findings{critFinding("")} // not triaged unproven
+	findings := core.Findings{critFinding(false)} // not triaged unproven
 	fail, count, err := evaluateGate(findings, "high", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -43,7 +43,7 @@ func TestEvaluateGateTripsOnConfirmedFinding(t *testing.T) {
 }
 
 func TestEvaluateGateDisabledWhenEmpty(t *testing.T) {
-	if fail, _, _ := evaluateGate(core.Findings{critFinding("")}, "", false); fail {
+	if fail, _, _ := evaluateGate(core.Findings{critFinding(false)}, "", false); fail {
 		t.Errorf("empty --fail-on must disable the gate")
 	}
 }

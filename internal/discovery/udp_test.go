@@ -42,12 +42,25 @@ func TestValidNTPResponseChecksMode(t *testing.T) {
 	}
 }
 
-func TestValidSNMPResponseNeedsSequenceAndCommunity(t *testing.T) {
-	ok := append([]byte{0x30, 0x20, 0x04, 0x06}, []byte("public....")...)
-	if !validSNMPResponse(nil, ok) {
-		t.Errorf("an SNMP sequence echoing the community should validate")
+func TestValidSNMPResponseNeedsResponsePDUAndCommunity(t *testing.T) {
+	sent := snmpGetPublic()
+
+	// A real reply is a SEQUENCE carrying the community and a GetResponse
+	// PDU (tag 0xa2).
+	ok := append([]byte{0x30, 0x20, 0x04, 0x06}, []byte("public")...)
+	ok = append(ok, 0xa2, 0x05, 0x02, 0x01, 0x00)
+	if !validSNMPResponse(sent, ok) {
+		t.Errorf("a GetResponse PDU echoing the community should validate")
 	}
-	if validSNMPResponse(nil, []byte("random udp noise")) {
+
+	// A reflecting/echo service returns our probe verbatim — our payload
+	// is itself a 0x30 sequence containing "public", so this is the FP the
+	// validator must reject.
+	if validSNMPResponse(sent, sent) {
+		t.Errorf("an echoed probe (no GetResponse PDU) must not validate")
+	}
+
+	if validSNMPResponse(sent, []byte("random udp noise")) {
 		t.Errorf("non-SNMP bytes must not validate")
 	}
 }

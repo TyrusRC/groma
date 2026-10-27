@@ -127,6 +127,9 @@ func (r *Report) WriteText(w io.Writer) error {
 				fmt.Fprintf(w, "      evidence: %s\n", f.Evidence)
 			}
 			meta := []string{}
+			if f.VersionUnconfirmed {
+				meta = append(meta, "unconfirmed (version-based)")
+			}
 			if len(f.CWE) > 0 {
 				meta = append(meta, strings.Join(f.CWE, ", "))
 			}
