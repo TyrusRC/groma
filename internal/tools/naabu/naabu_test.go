@@ -1,6 +1,8 @@
 package naabu
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -84,6 +86,22 @@ func TestFullRangeOptionsCoversEveryPortAndSkipsNoHost(t *testing.T) {
 	}
 	if hasFlag(args, "-ss") || hasFlag(args, "-smart-scan") {
 		t.Errorf("FullRangeOptions must never enable predictive (non-exhaustive) scanning, got %q", joined)
+	}
+}
+
+func TestFindNaabuFallsBackToGoBinWhenNotOnPath(t *testing.T) {
+	// Regression guard for the sudo case: naabu installed in a Go bin dir
+	// that sudo's secure_path drops must still be found, or SYN scans
+	// silently degrade to a connect scan.
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(dir, "no-such-path-dir")) // force LookPath to miss
+	t.Setenv("GOBIN", dir)
+	if got := findNaabu(); got != fake {
+		t.Errorf("findNaabu()=%q, want %q (GOBIN fallback)", got, fake)
 	}
 }
 

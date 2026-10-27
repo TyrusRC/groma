@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -168,11 +170,40 @@ type Naabu struct {
 }
 
 func New() *Naabu {
-	n := &Naabu{}
+	return &Naabu{binaryPath: findNaabu()}
+}
+
+// findNaabu locates the naabu binary. It honours $PATH first, then falls
+// back to the common Go install locations. The fallback matters under
+// sudo: sudo's secure_path drops ~/go/bin, so a naabu installed with
+// `go install` vanishes from $PATH and groma would silently degrade to
+// the connect-only native scanner — ignoring a --scan-type syn request
+// that only works via naabu, the exact reason to run as root. Resolving
+// the invoking user's Go bin (via SUDO_USER) keeps SYN scans working.
+func findNaabu() string {
 	if path, err := exec.LookPath("naabu"); err == nil {
-		n.binaryPath = path
+		return path
 	}
-	return n
+	var dirs []string
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		dirs = append(dirs, gobin)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, "go", "bin"))
+	}
+	if su := os.Getenv("SUDO_USER"); su != "" {
+		if u, err := user.Lookup(su); err == nil && u.HomeDir != "" {
+			dirs = append(dirs, filepath.Join(u.HomeDir, "go", "bin"))
+		}
+	}
+	dirs = append(dirs, "/usr/local/bin")
+	for _, d := range dirs {
+		p := filepath.Join(d, "naabu")
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 func (n *Naabu) Name() string      { return "naabu" }

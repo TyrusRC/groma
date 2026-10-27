@@ -317,7 +317,13 @@ func scanTargets(ctx context.Context, hosts []string, checkList []*checks.Check,
 		discovered, incomplete = discoverWithNaabu(ctx, n, hosts)
 		discovered, incomplete = verifyNaabuMisses(ctx, hosts, discovered, incomplete)
 	} else {
-		if verbose {
+		// A --scan-type syn request only works through naabu; the native
+		// scanner is connect-only. Say so loudly rather than silently
+		// downgrading — otherwise a user who ran as root specifically for a
+		// SYN scan gets a slow connect scan and no idea why.
+		if st := strings.ToLower(scanScanType); st == "syn" || st == "s" {
+			fmt.Fprintln(os.Stderr, "groma: WARNING: --scan-type syn needs naabu, which was not found; the native scanner does connect scans only, so a connect scan is running instead. Install naabu or put it on PATH (note: sudo's secure_path drops ~/go/bin).")
+		} else if verbose {
 			fmt.Fprintln(os.Stderr, "groma: naabu not found on $PATH, falling back to native TCP-connect scanner with banner fingerprinting")
 		}
 		discovered, incomplete = discoverNative(ctx, hosts)
